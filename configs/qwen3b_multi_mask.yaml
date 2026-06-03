@@ -1,10 +1,10 @@
-# configs/qwen3b_baseline.yaml
+# configs/qwen3b_multi_mask.yaml
 dataset:
   image_dir: data/raw
-  max_images: 50
+  max_images: 10
 
 target:
-  phrase: 'XXX'
+  phrase: "XXX"
   adaptive_prefix:
     enabled: true
     object_instruction: "Use fewer than 5 words to list objects in the image."
@@ -18,8 +18,8 @@ rendering:
     - 0.02
     - 0.03
     - 0.04
-  max_characters_per_line: 42
-  color_strategy: top_ranked_mask_average
+  color_strategy: adaptive_mask_average
+  min_font_scale: 0.02
   brightness_offset: 20
   sam_model_type: vit_b
   points_per_side: 32
@@ -35,4 +35,4 @@ model:
 
 output:
   generated_dir: data/generated
-  results_path: results/qwen3b_top_mask.jsonl
+  results_path: results/qwen3b_multi_mask.jsonl

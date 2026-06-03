@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-
 DEFAULT_QWEN_MODEL_ID = "Qwen/Qwen2.5-VL-3B-Instruct"
 
 
@@ -53,17 +52,14 @@ class QwenVisionModelClient:
         path = Path(image_path)
         if not path.exists():
             raise FileNotFoundError(f"image not found: {path}")
-        if not instruction.strip():
-            raise ValueError("instruction must be a non-empty string")
-
         self._ensure_loaded()
+        content = [{"type": "image", "image": str(path)}]
+        if instruction:
+            content.append({"type": "text", "text": instruction})
         messages = [
             {
                 "role": "user",
-                "content": [
-                    {"type": "image", "image": str(path)},
-                    {"type": "text", "text": instruction},
-                ],
+                "content": content,
             }
         ]
         text = self._processor.apply_chat_template(
@@ -80,7 +76,9 @@ class QwenVisionModelClient:
         if hasattr(inputs, "to"):
             inputs = inputs.to(self._input_device())
 
-        generated_ids = self._model.generate(**inputs, max_new_tokens=self.max_new_tokens)
+        generated_ids = self._model.generate(
+            **inputs, max_new_tokens=self.max_new_tokens
+        )
         generated_ids_trimmed = [
             output_ids[len(input_ids) :]
             for input_ids, output_ids in zip(inputs.input_ids, generated_ids)

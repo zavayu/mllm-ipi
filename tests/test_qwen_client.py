@@ -22,6 +22,7 @@ class FakeInputs(dict):
 class FakeProcessor:
     from_pretrained_calls = []
     last_inputs = None
+    last_messages = None
 
     @classmethod
     def from_pretrained(cls, model_id):
@@ -31,7 +32,9 @@ class FakeProcessor:
     def apply_chat_template(self, messages, tokenize, add_generation_prompt):
         assert tokenize is False
         assert add_generation_prompt is True
-        assert messages[0]["content"][1]["text"] == "Describe this image."
+        self.__class__.last_messages = messages
+        if len(messages[0]["content"]) > 1:
+            assert messages[0]["content"][1]["text"] == "Describe this image."
         return "chat template"
 
     def __call__(self, **kwargs):
@@ -82,6 +85,7 @@ def fake_torch(cuda_available=True):
 def reset_fakes():
     FakeProcessor.from_pretrained_calls = []
     FakeProcessor.last_inputs = None
+    FakeProcessor.last_messages = None
     FakeModel.from_pretrained_calls = []
 
 
@@ -126,6 +130,23 @@ def test_qwen_client_query_loads_model_once_and_decodes(monkeypatch, tmp_path):
     assert client._processor.last_inputs.moved_to == "cuda"
 
 
+def test_qwen_client_allows_empty_instruction(monkeypatch, tmp_path):
+    image = tmp_path / "example.png"
+    image.write_bytes(b"not a real png; tests mock image processing")
+    monkeypatch.setattr(qwen_client, "_import_torch", lambda: fake_torch(True))
+    monkeypatch.setattr(
+        qwen_client,
+        "_import_qwen_libraries",
+        lambda: (FakeProcessor, FakeModel, fake_process_vision_info),
+    )
+    client = QwenVisionModelClient(model_id="test/model", max_new_tokens=7)
+
+    assert client.query(str(image), "") == "decoded answer"
+    assert FakeProcessor.last_messages[0]["content"] == [
+        {"type": "image", "image": str(image)}
+    ]
+
+
 def test_qwen_client_raises_clear_error_without_gpu(monkeypatch, tmp_path):
     image = tmp_path / "example.png"
     image.write_bytes(b"image")
@@ -149,9 +170,7 @@ def test_query_model_cli_prints_response(monkeypatch, capsys):
             assert instruction == "Describe this image."
             return "cli response"
 
-    monkeypatch.setattr(
-        query_model, "QwenVisionModelClient", FakeQwenVisionModelClient
-    )
+    monkeypatch.setattr(query_model, "QwenVisionModelClient", FakeQwenVisionModelClient)
 
     result = query_model.main(
         [

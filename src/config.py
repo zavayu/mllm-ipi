@@ -63,6 +63,7 @@ class RenderingConfig:
     colors: tuple[tuple[int, int, int], ...] = ((255, 0, 0),)
     max_characters_per_line: int | None = None
     color_strategy: str = "static"
+    min_font_scale: float = 0.02
     brightness_offset: int = DEFAULT_BRIGHTNESS_OFFSET
     sam_checkpoint: Path | None = None
     sam_model_type: str = "vit_b"
@@ -112,11 +113,13 @@ def _required_string(data: dict[str, Any], key: str) -> str:
     return value
 
 
-def _optional_string(data: dict[str, Any], key: str) -> str | None:
+def _optional_string(
+    data: dict[str, Any], key: str, *, allow_empty: bool = False
+) -> str | None:
     value = data.get(key)
     if value is None:
         return None
-    if not isinstance(value, str) or not value:
+    if not isinstance(value, str) or (not allow_empty and not value):
         raise ValueError(f"config value {key!r} must be a non-empty string")
     return value
 
@@ -177,6 +180,13 @@ def _float(data: dict[str, Any], key: str, default: float) -> float:
     if not isinstance(value, int | float):
         raise ValueError(f"config value {key!r} must be a number")
     return float(value)
+
+
+def _positive_float(data: dict[str, Any], key: str, default: float) -> float:
+    value = _float(data, key, default)
+    if value <= 0:
+        raise ValueError(f"config value {key!r} must be a positive number")
+    return value
 
 
 def _colors(data: dict[str, Any]) -> tuple[tuple[int, int, int], ...]:
@@ -240,6 +250,7 @@ def load_config(path: str | Path) -> ExperimentConfig:
                 rendering, "max_characters_per_line"
             ),
             color_strategy=_optional_string(rendering, "color_strategy") or "static",
+            min_font_scale=_positive_float(rendering, "min_font_scale", 0.02),
             brightness_offset=_int(
                 rendering, "brightness_offset", DEFAULT_BRIGHTNESS_OFFSET
             ),
@@ -257,7 +268,7 @@ def load_config(path: str | Path) -> ExperimentConfig:
             type=_required_string(model, "type"),
             response=_optional_string(model, "response"),
             model_id=_optional_string(model, "model_id"),
-            instruction=_optional_string(model, "instruction"),
+            instruction=_optional_string(model, "instruction", allow_empty=True),
             max_new_tokens=_positive_int(model, "max_new_tokens", 256),
             require_gpu=_optional_bool(model, "require_gpu", True),
             torch_dtype=_optional_string(model, "torch_dtype") or "auto",

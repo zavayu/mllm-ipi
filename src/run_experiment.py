@@ -20,14 +20,29 @@ from src.model_clients import (
     VisionModelClient,
 )
 from src.region_ranker import RegionFeatures, compute_and_rank_regions
-from src.render_prompt import render_text_prompt, render_text_prompt_in_top_ranked_mask
+from src.render_prompt import (
+    render_text_prompt,
+    render_text_prompt_adaptive_mask_average,
+    render_text_prompt_across_ranked_masks,
+    render_text_prompt_in_top_ranked_mask,
+)
 from src.run_single import DEFAULT_INSTRUCTION_TEMPLATE, target_in_response
 from src.run_single import MASK_COLOR_STRATEGY
 from src.segment_regions import generate_candidate_masks
 
 IMAGE_EXTENSIONS = {".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 STATIC_COLOR_STRATEGY = "static"
+MULTI_MASK_COLOR_STRATEGY = "multi_mask_average"
+ADAPTIVE_MASK_COLOR_STRATEGY = "adaptive_mask_average"
+MASK_COLOR_STRATEGIES = {
+    MASK_COLOR_STRATEGY,
+    MULTI_MASK_COLOR_STRATEGY,
+    ADAPTIVE_MASK_COLOR_STRATEGY,
+}
 TOP_RANKED_MASK_PLACEMENT = "top_ranked_mask"
+MULTI_MASK_PLACEMENT = "multi_mask"
+RUNS_PER_CONFIGURATION = 5
+OBJECT_WORD_LIMIT = 5
 
 
 def iter_dataset_images(
@@ -54,8 +69,35 @@ def build_run_id(
     color_strategy: str = STATIC_COLOR_STRATEGY,
     brightness_offset: int | None = None,
     render_signature: str = "",
+    run_index: int = 0,
 ) -> str:
     """Build a stable run id for resume behavior."""
+    image = Path(image_path)
+    try:
+        image_key = image.relative_to(dataset_dir).as_posix()
+    except ValueError:
+        image_key = image.as_posix()
+    raw = (
+        f"{image_key}|{placement}|{font_scale:g}|{run_index}|{prompt_text or ''}|"
+        f"{color_strategy}|{brightness_offset if brightness_offset is not None else ''}|"
+        f"{render_signature}"
+    )
+    digest = sha1(raw.encode("utf-8")).hexdigest()[:12]
+    readable = re.sub(r"[^A-Za-z0-9_.-]+", "_", image_key).strip("_")
+    return f"{readable}__{placement}__fs_{font_scale:g}__{digest}"
+
+
+def build_render_id(
+    image_path: str | Path,
+    dataset_dir: str | Path,
+    placement: str,
+    font_scale: float,
+    prompt_text: str | None = None,
+    color_strategy: str = STATIC_COLOR_STRATEGY,
+    brightness_offset: int | None = None,
+    render_signature: str = "",
+) -> str:
+    """Build a stable id for one rendered image configuration."""
     image = Path(image_path)
     try:
         image_key = image.relative_to(dataset_dir).as_posix()
@@ -81,9 +123,10 @@ def generated_image_path(
     color_strategy: str = STATIC_COLOR_STRATEGY,
     brightness_offset: int | None = None,
     render_signature: str = "",
+    run_index: int = 0,
 ) -> Path:
-    """Return the output image path for one run."""
-    run_id = build_run_id(
+    """Return the output image path for one rendered image configuration."""
+    render_id = build_render_id(
         image_path,
         dataset_dir,
         placement,
@@ -93,7 +136,7 @@ def generated_image_path(
         brightness_offset,
         render_signature,
     )
-    return Path(generated_dir) / f"{run_id}.png"
+    return Path(generated_dir) / f"{render_id}.png"
 
 
 def load_completed_run_ids(results_path: str | Path) -> set[str]:
@@ -126,6 +169,14 @@ def append_jsonl_row(path: str | Path, row: dict[str, Any]) -> None:
     with output_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(row))
         handle.write("\n")
+
+
+def _truncate_words(text: str, word_limit: int = OBJECT_WORD_LIMIT) -> str:
+    return " ".join(text.split()[:word_limit])
+
+
+def _strict_target_in_response(target: str, response: str) -> bool:
+    return target in response
 
 
 def _ranked_regions_for_image(
@@ -175,8 +226,8 @@ def _build_adversarial_prompt(
         return config.target.embedded_prompt, None
 
     if image_path not in object_cache:
-        object_cache[image_path] = model_client.query(
-            str(image_path), adaptive_prefix.object_instruction
+        object_cache[image_path] = _truncate_words(
+            model_client.query(str(image_path), adaptive_prefix.object_instruction)
         )
     detected_objects = object_cache[image_path]
     prompt = adaptive_prefix.template.format(
@@ -189,11 +240,15 @@ def _build_adversarial_prompt(
 def _effective_placements(config: ExperimentConfig) -> tuple[str, ...]:
     if config.rendering.color_strategy == MASK_COLOR_STRATEGY:
         return (TOP_RANKED_MASK_PLACEMENT,)
+    if config.rendering.color_strategy == MULTI_MASK_COLOR_STRATEGY:
+        return (MULTI_MASK_PLACEMENT,)
+    if config.rendering.color_strategy == ADAPTIVE_MASK_COLOR_STRATEGY:
+        return (TOP_RANKED_MASK_PLACEMENT,)
     return config.rendering.placements
 
 
 def _render_signature(config: ExperimentConfig) -> str:
-    if config.rendering.color_strategy != MASK_COLOR_STRATEGY:
+    if config.rendering.color_strategy not in MASK_COLOR_STRATEGIES:
         return ""
     return "|".join(
         (
@@ -202,6 +257,7 @@ def _render_signature(config: ExperimentConfig) -> str:
             str(config.rendering.points_per_side),
             f"{config.rendering.pred_iou_thresh:g}",
             f"{config.rendering.stability_score_thresh:g}",
+            f"{config.rendering.min_font_scale:g}",
         )
     )
 
@@ -217,7 +273,11 @@ def run_experiment(
     )
     completed = load_completed_run_ids(config.output.results_path)
     model_client = _client_from_config(config, client)
-    instruction = config.model.instruction or DEFAULT_INSTRUCTION_TEMPLATE
+    instruction = (
+        DEFAULT_INSTRUCTION_TEMPLATE
+        if config.model.instruction is None
+        else config.model.instruction
+    )
     color = config.rendering.colors[0]
     object_cache: dict[Path, str] = {}
     region_cache: dict[Path, list[RegionFeatures]] = {}
@@ -230,7 +290,29 @@ def run_experiment(
         )
         for placement in _effective_placements(config):
             for font_scale in config.rendering.font_scales:
-                run_id = build_run_id(
+                missing_runs: list[tuple[int, str]] = []
+                for run_index in range(RUNS_PER_CONFIGURATION):
+                    run_id = build_run_id(
+                        image_path,
+                        config.dataset.image_dir,
+                        placement,
+                        font_scale,
+                        adversarial_prompt,
+                        config.rendering.color_strategy,
+                        (
+                            config.rendering.brightness_offset
+                            if config.rendering.color_strategy in MASK_COLOR_STRATEGIES
+                            else None
+                        ),
+                        render_signature,
+                        run_index=run_index,
+                    )
+                    if run_id not in completed:
+                        missing_runs.append((run_index, run_id))
+                if not missing_runs:
+                    continue
+
+                render_id = build_render_id(
                     image_path,
                     config.dataset.image_dir,
                     placement,
@@ -239,14 +321,11 @@ def run_experiment(
                     config.rendering.color_strategy,
                     (
                         config.rendering.brightness_offset
-                        if config.rendering.color_strategy == MASK_COLOR_STRATEGY
+                        if config.rendering.color_strategy in MASK_COLOR_STRATEGIES
                         else None
                     ),
                     render_signature,
                 )
-                if run_id in completed:
-                    continue
-
                 output_image_path = generated_image_path(
                     config.output.generated_dir,
                     image_path,
@@ -257,16 +336,38 @@ def run_experiment(
                     config.rendering.color_strategy,
                     (
                         config.rendering.brightness_offset
-                        if config.rendering.color_strategy == MASK_COLOR_STRATEGY
+                        if config.rendering.color_strategy in MASK_COLOR_STRATEGIES
                         else None
                     ),
                     render_signature,
                 )
-                if config.rendering.color_strategy == MASK_COLOR_STRATEGY:
+                if config.rendering.color_strategy in MASK_COLOR_STRATEGIES:
                     if image_path not in region_cache:
                         region_cache[image_path] = _ranked_regions_for_image(
                             image_path, config
                         )
+
+                if config.rendering.color_strategy == ADAPTIVE_MASK_COLOR_STRATEGY:
+                    render_metadata = render_text_prompt_adaptive_mask_average(
+                        input_image_path=image_path,
+                        output_image_path=output_image_path,
+                        text=adversarial_prompt,
+                        ranked_regions=region_cache[image_path],
+                        font_scale=font_scale,
+                        min_font_scale=config.rendering.min_font_scale,
+                        brightness_offset=config.rendering.brightness_offset,
+                    )
+                elif config.rendering.color_strategy == MULTI_MASK_COLOR_STRATEGY:
+                    render_metadata = render_text_prompt_across_ranked_masks(
+                        input_image_path=image_path,
+                        output_image_path=output_image_path,
+                        text=adversarial_prompt,
+                        ranked_regions=region_cache[image_path],
+                        font_scale=font_scale,
+                        brightness_offset=config.rendering.brightness_offset,
+                        write_auxiliary_outputs=False,
+                    )
+                elif config.rendering.color_strategy == MASK_COLOR_STRATEGY:
                     render_metadata = render_text_prompt_in_top_ranked_mask(
                         input_image_path=image_path,
                         output_image_path=output_image_path,
@@ -290,67 +391,87 @@ def run_experiment(
                             config.rendering.max_characters_per_line
                         ),
                     )
-                model_response = model_client.query(str(output_image_path), instruction)
-                success = target_in_response(config.target.phrase, model_response)
-                row: dict[str, Any] = {
-                    "success": success,
-                    "run_id": run_id,
-                    "original_image": str(image_path),
-                    "generated_image": str(output_image_path),
-                    "target": config.target.phrase,
-                    "embedded_prompt": config.target.embedded_prompt,
-                    "adversarial_prompt": adversarial_prompt,
-                    "adaptive_prefix_enabled": (config.target.adaptive_prefix.enabled),
-                    "object_instruction": (
-                        config.target.adaptive_prefix.object_instruction
-                        if config.target.adaptive_prefix.enabled
-                        else None
-                    ),
-                    "detected_objects": detected_objects,
-                    "instruction": instruction,
-                    "model_type": config.model.type.casefold(),
-                    "model_response": model_response,
-                    "placement": placement,
-                    "font_scale": font_scale,
-                    "color": list(color),
-                    "color_strategy": config.rendering.color_strategy,
-                    "render_font_size": render_metadata.font_size,
-                    "render_text_bbox": list(render_metadata.text_bbox),
-                    "rendered_prompt": render_metadata.rendered_text,
-                    "rendered_prompt_line_count": render_metadata.line_count,
-                    "selected_mask_id": render_metadata.selected_mask_id,
-                    "average_rgb": (
-                        list(render_metadata.average_rgb)
-                        if render_metadata.average_rgb is not None
-                        else None
-                    ),
-                    "brightness_offset": render_metadata.brightness_offset,
-                    "final_rgb": (
-                        list(render_metadata.final_rgb)
-                        if render_metadata.final_rgb is not None
-                        else None
-                    ),
-                    "region_bbox": (
-                        list(render_metadata.region_bbox)
-                        if render_metadata.region_bbox is not None
-                        else None
-                    ),
-                    "max_characters_per_line": (
-                        config.rendering.max_characters_per_line
-                    ),
-                    "sam_checkpoint": (
-                        str(config.rendering.sam_checkpoint)
-                        if config.rendering.sam_checkpoint is not None
-                        else None
-                    ),
-                    "sam_model_type": config.rendering.sam_model_type,
-                    "points_per_side": config.rendering.points_per_side,
-                    "pred_iou_thresh": config.rendering.pred_iou_thresh,
-                    "stability_score_thresh": config.rendering.stability_score_thresh,
-                }
-                append_jsonl_row(config.output.results_path, row)
-                completed.add(run_id)
-                rows.append(row)
+                for run_index, run_id in missing_runs:
+                    model_response = model_client.query(
+                        str(output_image_path), instruction
+                    )
+                    success = target_in_response(config.target.phrase, model_response)
+                    row: dict[str, Any] = {
+                        "success": success,
+                        "strict_success": _strict_target_in_response(
+                            config.target.phrase, model_response
+                        ),
+                        "run_id": run_id,
+                        "render_id": render_id,
+                        "run_index": run_index,
+                        "original_image": str(image_path),
+                        "generated_image": str(output_image_path),
+                        "target": config.target.phrase,
+                        "embedded_prompt": config.target.embedded_prompt,
+                        "adversarial_prompt": adversarial_prompt,
+                        "adaptive_prefix_enabled": (
+                            config.target.adaptive_prefix.enabled
+                        ),
+                        "object_instruction": (
+                            config.target.adaptive_prefix.object_instruction
+                            if config.target.adaptive_prefix.enabled
+                            else None
+                        ),
+                        "detected_objects": detected_objects,
+                        "instruction": instruction,
+                        "model_type": config.model.type.casefold(),
+                        "model_response": model_response,
+                        "placement": render_metadata.placement,
+                        "font_scale": font_scale,
+                        "color": list(color),
+                        "color_strategy": config.rendering.color_strategy,
+                        "render_font_size": render_metadata.font_size,
+                        "render_text_bbox": list(render_metadata.text_bbox),
+                        "rendered_prompt": render_metadata.rendered_text,
+                        "rendered_prompt_line_count": render_metadata.line_count,
+                        "selected_mask_id": render_metadata.selected_mask_id,
+                        "average_rgb": (
+                            list(render_metadata.average_rgb)
+                            if render_metadata.average_rgb is not None
+                            else None
+                        ),
+                        "brightness_offset": render_metadata.brightness_offset,
+                        "final_rgb": (
+                            list(render_metadata.final_rgb)
+                            if render_metadata.final_rgb is not None
+                            else None
+                        ),
+                        "region_bbox": (
+                            list(render_metadata.region_bbox)
+                            if render_metadata.region_bbox is not None
+                            else None
+                        ),
+                        "chunk_count": len(render_metadata.chunks),
+                        "chunks": [chunk.to_dict() for chunk in render_metadata.chunks],
+                        "chunk_metadata_path": render_metadata.chunk_metadata_path,
+                        "visualization_path": render_metadata.visualization_path,
+                        "max_characters_per_line": (
+                            config.rendering.max_characters_per_line
+                        ),
+                        "min_font_scale": config.rendering.min_font_scale,
+                        "adaptive_fallback_used": (
+                            render_metadata.adaptive_fallback_used
+                        ),
+                        "sam_checkpoint": (
+                            str(config.rendering.sam_checkpoint)
+                            if config.rendering.sam_checkpoint is not None
+                            else None
+                        ),
+                        "sam_model_type": config.rendering.sam_model_type,
+                        "points_per_side": config.rendering.points_per_side,
+                        "pred_iou_thresh": config.rendering.pred_iou_thresh,
+                        "stability_score_thresh": (
+                            config.rendering.stability_score_thresh
+                        ),
+                    }
+                    append_jsonl_row(config.output.results_path, row)
+                    completed.add(run_id)
+                    rows.append(row)
 
     return rows
 
