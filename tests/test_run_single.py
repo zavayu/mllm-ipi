@@ -42,6 +42,7 @@ def test_run_single_image_creates_generated_image_and_jsonl(tmp_path):
 
     lines = results_path.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 1
+    assert lines[0].startswith('{"success":')
     assert json.loads(lines[0]) == row
 
 
@@ -77,6 +78,7 @@ def test_run_single_cli_creates_generated_image_and_jsonl(tmp_path):
 
     lines = results_path.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 1
+    assert lines[0].startswith('{"success":')
     row = json.loads(lines[0])
     assert row["generated_image"] == str(generated_path)
     assert row["target"] == "BANANA"

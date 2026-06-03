@@ -21,6 +21,12 @@ rendering:
     - 0.04
     - 0.05
   max_characters_per_line: 42
+  color_strategy: top_ranked_mask_average
+  brightness_offset: 20
+  sam_model_type: vit_b
+  points_per_side: 32
+  pred_iou_thresh: 0.88
+  stability_score_thresh: 0.95
   colors:
     - [255, 0, 0]
 
@@ -31,4 +37,4 @@ model:
 
 output:
   generated_dir: data/generated
-  results_path: results/qwen3b_baseline.jsonl
+  results_path: results/qwen3b_top_mask.jsonl

@@ -8,7 +8,7 @@ from typing import Any
 
 import yaml
 
-from src.render_prompt import SUPPORTED_PLACEMENTS
+from src.render_prompt import DEFAULT_BRIGHTNESS_OFFSET, SUPPORTED_PLACEMENTS
 
 
 @dataclass(frozen=True)
@@ -62,6 +62,13 @@ class RenderingConfig:
     font_scales: tuple[float, ...]
     colors: tuple[tuple[int, int, int], ...] = ((255, 0, 0),)
     max_characters_per_line: int | None = None
+    color_strategy: str = "static"
+    brightness_offset: int = DEFAULT_BRIGHTNESS_OFFSET
+    sam_checkpoint: Path | None = None
+    sam_model_type: str = "vit_b"
+    points_per_side: int = 32
+    pred_iou_thresh: float = 0.88
+    stability_score_thresh: float = 0.95
 
 
 @dataclass(frozen=True)
@@ -130,6 +137,13 @@ def _positive_int(data: dict[str, Any], key: str, default: int) -> int:
     return value
 
 
+def _int(data: dict[str, Any], key: str, default: int) -> int:
+    value = data.get(key, default)
+    if not isinstance(value, int):
+        raise ValueError(f"config value {key!r} must be an integer")
+    return value
+
+
 def _optional_bool(data: dict[str, Any], key: str, default: bool) -> bool:
     value = data.get(key, default)
     if not isinstance(value, bool):
@@ -156,6 +170,13 @@ def _float_sequence(data: dict[str, Any], key: str) -> tuple[float, ...]:
             raise ValueError(f"config value {key!r} must contain positive numbers")
         numbers.append(float(item))
     return tuple(numbers)
+
+
+def _float(data: dict[str, Any], key: str, default: float) -> float:
+    value = data.get(key, default)
+    if not isinstance(value, int | float):
+        raise ValueError(f"config value {key!r} must be a number")
+    return float(value)
 
 
 def _colors(data: dict[str, Any]) -> tuple[tuple[int, int, int], ...]:
@@ -218,6 +239,19 @@ def load_config(path: str | Path) -> ExperimentConfig:
             max_characters_per_line=_optional_positive_int(
                 rendering, "max_characters_per_line"
             ),
+            color_strategy=_optional_string(rendering, "color_strategy") or "static",
+            brightness_offset=_int(
+                rendering, "brightness_offset", DEFAULT_BRIGHTNESS_OFFSET
+            ),
+            sam_checkpoint=(
+                Path(value)
+                if (value := _optional_string(rendering, "sam_checkpoint"))
+                else None
+            ),
+            sam_model_type=_optional_string(rendering, "sam_model_type") or "vit_b",
+            points_per_side=_positive_int(rendering, "points_per_side", 32),
+            pred_iou_thresh=_float(rendering, "pred_iou_thresh", 0.88),
+            stability_score_thresh=_float(rendering, "stability_score_thresh", 0.95),
         ),
         model=ModelConfig(
             type=_required_string(model, "type"),

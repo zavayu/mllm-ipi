@@ -17,6 +17,13 @@ rendering:
   placements: [center, top_right]
   font_scales: [0.1, 0.2]
   max_characters_per_line: 20
+  color_strategy: top_ranked_mask_average
+  brightness_offset: -20
+  sam_checkpoint: models/sam_vit_b.pth
+  sam_model_type: vit_l
+  points_per_side: 16
+  pred_iou_thresh: 0.7
+  stability_score_thresh: 0.8
   colors:
     - [255, 255, 255]
 model:
@@ -44,6 +51,16 @@ output:
     assert config.rendering.font_scales == (0.1, 0.2)
     assert config.rendering.colors == ((255, 255, 255),)
     assert config.rendering.max_characters_per_line == 20
+    assert config.rendering.color_strategy == "top_ranked_mask_average"
+    assert config.rendering.brightness_offset == -20
+    assert str(config.rendering.sam_checkpoint) in {
+        "models\\sam_vit_b.pth",
+        "models/sam_vit_b.pth",
+    }
+    assert config.rendering.sam_model_type == "vit_l"
+    assert config.rendering.points_per_side == 16
+    assert config.rendering.pred_iou_thresh == 0.7
+    assert config.rendering.stability_score_thresh == 0.8
     assert config.model.type == "mock"
     assert config.model.response == "BANANA"
     assert config.model.instruction is None

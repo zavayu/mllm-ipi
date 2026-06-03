@@ -9,6 +9,9 @@ from hashlib import sha1
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+from PIL import Image
+
 from src.config import ExperimentConfig, load_config
 from src.model_clients import (
     DEFAULT_QWEN_MODEL_ID,
@@ -16,10 +19,15 @@ from src.model_clients import (
     QwenVisionModelClient,
     VisionModelClient,
 )
-from src.render_prompt import render_text_prompt
+from src.region_ranker import RegionFeatures, compute_and_rank_regions
+from src.render_prompt import render_text_prompt, render_text_prompt_in_top_ranked_mask
 from src.run_single import DEFAULT_INSTRUCTION_TEMPLATE, target_in_response
+from src.run_single import MASK_COLOR_STRATEGY
+from src.segment_regions import generate_candidate_masks
 
 IMAGE_EXTENSIONS = {".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
+STATIC_COLOR_STRATEGY = "static"
+TOP_RANKED_MASK_PLACEMENT = "top_ranked_mask"
 
 
 def iter_dataset_images(
@@ -43,6 +51,9 @@ def build_run_id(
     placement: str,
     font_scale: float,
     prompt_text: str | None = None,
+    color_strategy: str = STATIC_COLOR_STRATEGY,
+    brightness_offset: int | None = None,
+    render_signature: str = "",
 ) -> str:
     """Build a stable run id for resume behavior."""
     image = Path(image_path)
@@ -50,7 +61,11 @@ def build_run_id(
         image_key = image.relative_to(dataset_dir).as_posix()
     except ValueError:
         image_key = image.as_posix()
-    raw = f"{image_key}|{placement}|{font_scale:g}|{prompt_text or ''}"
+    raw = (
+        f"{image_key}|{placement}|{font_scale:g}|{prompt_text or ''}|"
+        f"{color_strategy}|{brightness_offset if brightness_offset is not None else ''}|"
+        f"{render_signature}"
+    )
     digest = sha1(raw.encode("utf-8")).hexdigest()[:12]
     readable = re.sub(r"[^A-Za-z0-9_.-]+", "_", image_key).strip("_")
     return f"{readable}__{placement}__fs_{font_scale:g}__{digest}"
@@ -63,9 +78,21 @@ def generated_image_path(
     placement: str,
     font_scale: float,
     prompt_text: str | None = None,
+    color_strategy: str = STATIC_COLOR_STRATEGY,
+    brightness_offset: int | None = None,
+    render_signature: str = "",
 ) -> Path:
     """Return the output image path for one run."""
-    run_id = build_run_id(image_path, dataset_dir, placement, font_scale, prompt_text)
+    run_id = build_run_id(
+        image_path,
+        dataset_dir,
+        placement,
+        font_scale,
+        prompt_text,
+        color_strategy,
+        brightness_offset,
+        render_signature,
+    )
     return Path(generated_dir) / f"{run_id}.png"
 
 
@@ -97,8 +124,25 @@ def append_jsonl_row(path: str | Path, row: dict[str, Any]) -> None:
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(row, sort_keys=True))
+        handle.write(json.dumps(row))
         handle.write("\n")
+
+
+def _ranked_regions_for_image(
+    image_path: str | Path,
+    config: ExperimentConfig,
+) -> list[RegionFeatures]:
+    with Image.open(image_path) as image:
+        image_array = np.asarray(image.convert("RGB"))
+    masks = generate_candidate_masks(
+        image_array,
+        sam_checkpoint=config.rendering.sam_checkpoint,
+        sam_model_type=config.rendering.sam_model_type,
+        points_per_side=config.rendering.points_per_side,
+        pred_iou_thresh=config.rendering.pred_iou_thresh,
+        stability_score_thresh=config.rendering.stability_score_thresh,
+    )
+    return compute_and_rank_regions(image_array, masks)
 
 
 def _client_from_config(
@@ -142,6 +186,26 @@ def _build_adversarial_prompt(
     return prompt, detected_objects
 
 
+def _effective_placements(config: ExperimentConfig) -> tuple[str, ...]:
+    if config.rendering.color_strategy == MASK_COLOR_STRATEGY:
+        return (TOP_RANKED_MASK_PLACEMENT,)
+    return config.rendering.placements
+
+
+def _render_signature(config: ExperimentConfig) -> str:
+    if config.rendering.color_strategy != MASK_COLOR_STRATEGY:
+        return ""
+    return "|".join(
+        (
+            str(config.rendering.sam_checkpoint or ""),
+            config.rendering.sam_model_type,
+            str(config.rendering.points_per_side),
+            f"{config.rendering.pred_iou_thresh:g}",
+            f"{config.rendering.stability_score_thresh:g}",
+        )
+    )
+
+
 def run_experiment(
     config: ExperimentConfig,
     *,
@@ -156,13 +220,15 @@ def run_experiment(
     instruction = config.model.instruction or DEFAULT_INSTRUCTION_TEMPLATE
     color = config.rendering.colors[0]
     object_cache: dict[Path, str] = {}
+    region_cache: dict[Path, list[RegionFeatures]] = {}
+    render_signature = _render_signature(config)
     rows: list[dict[str, Any]] = []
 
     for image_path in image_paths:
         adversarial_prompt, detected_objects = _build_adversarial_prompt(
             config, image_path, model_client, object_cache
         )
-        for placement in config.rendering.placements:
+        for placement in _effective_placements(config):
             for font_scale in config.rendering.font_scales:
                 run_id = build_run_id(
                     image_path,
@@ -170,6 +236,13 @@ def run_experiment(
                     placement,
                     font_scale,
                     adversarial_prompt,
+                    config.rendering.color_strategy,
+                    (
+                        config.rendering.brightness_offset
+                        if config.rendering.color_strategy == MASK_COLOR_STRATEGY
+                        else None
+                    ),
+                    render_signature,
                 )
                 if run_id in completed:
                     continue
@@ -181,19 +254,46 @@ def run_experiment(
                     placement,
                     font_scale,
                     adversarial_prompt,
+                    config.rendering.color_strategy,
+                    (
+                        config.rendering.brightness_offset
+                        if config.rendering.color_strategy == MASK_COLOR_STRATEGY
+                        else None
+                    ),
+                    render_signature,
                 )
-                render_metadata = render_text_prompt(
-                    input_image_path=image_path,
-                    output_image_path=output_image_path,
-                    text=adversarial_prompt,
-                    placement=placement,
-                    font_scale=font_scale,
-                    color=color,
-                    max_characters_per_line=(config.rendering.max_characters_per_line),
-                )
+                if config.rendering.color_strategy == MASK_COLOR_STRATEGY:
+                    if image_path not in region_cache:
+                        region_cache[image_path] = _ranked_regions_for_image(
+                            image_path, config
+                        )
+                    render_metadata = render_text_prompt_in_top_ranked_mask(
+                        input_image_path=image_path,
+                        output_image_path=output_image_path,
+                        text=adversarial_prompt,
+                        ranked_regions=region_cache[image_path],
+                        font_scale=font_scale,
+                        brightness_offset=config.rendering.brightness_offset,
+                        max_characters_per_line=(
+                            config.rendering.max_characters_per_line
+                        ),
+                    )
+                else:
+                    render_metadata = render_text_prompt(
+                        input_image_path=image_path,
+                        output_image_path=output_image_path,
+                        text=adversarial_prompt,
+                        placement=placement,
+                        font_scale=font_scale,
+                        color=color,
+                        max_characters_per_line=(
+                            config.rendering.max_characters_per_line
+                        ),
+                    )
                 model_response = model_client.query(str(output_image_path), instruction)
                 success = target_in_response(config.target.phrase, model_response)
                 row: dict[str, Any] = {
+                    "success": success,
                     "run_id": run_id,
                     "original_image": str(image_path),
                     "generated_image": str(output_image_path),
@@ -210,17 +310,43 @@ def run_experiment(
                     "instruction": instruction,
                     "model_type": config.model.type.casefold(),
                     "model_response": model_response,
-                    "success": success,
                     "placement": placement,
                     "font_scale": font_scale,
                     "color": list(color),
+                    "color_strategy": config.rendering.color_strategy,
                     "render_font_size": render_metadata.font_size,
                     "render_text_bbox": list(render_metadata.text_bbox),
                     "rendered_prompt": render_metadata.rendered_text,
                     "rendered_prompt_line_count": render_metadata.line_count,
+                    "selected_mask_id": render_metadata.selected_mask_id,
+                    "average_rgb": (
+                        list(render_metadata.average_rgb)
+                        if render_metadata.average_rgb is not None
+                        else None
+                    ),
+                    "brightness_offset": render_metadata.brightness_offset,
+                    "final_rgb": (
+                        list(render_metadata.final_rgb)
+                        if render_metadata.final_rgb is not None
+                        else None
+                    ),
+                    "region_bbox": (
+                        list(render_metadata.region_bbox)
+                        if render_metadata.region_bbox is not None
+                        else None
+                    ),
                     "max_characters_per_line": (
                         config.rendering.max_characters_per_line
                     ),
+                    "sam_checkpoint": (
+                        str(config.rendering.sam_checkpoint)
+                        if config.rendering.sam_checkpoint is not None
+                        else None
+                    ),
+                    "sam_model_type": config.rendering.sam_model_type,
+                    "points_per_side": config.rendering.points_per_side,
+                    "pred_iou_thresh": config.rendering.pred_iou_thresh,
+                    "stability_score_thresh": config.rendering.stability_score_thresh,
                 }
                 append_jsonl_row(config.output.results_path, row)
                 completed.add(run_id)
