@@ -1,4 +1,4 @@
-"""Run config-driven mock experiments over an image dataset."""
+"""Run config-driven experiments over an image dataset."""
 
 from __future__ import annotations
 
@@ -10,7 +10,12 @@ from pathlib import Path
 from typing import Any
 
 from src.config import ExperimentConfig, load_config
-from src.model_clients import MockVisionModelClient, VisionModelClient
+from src.model_clients import (
+    DEFAULT_QWEN_MODEL_ID,
+    MockVisionModelClient,
+    QwenVisionModelClient,
+    VisionModelClient,
+)
 from src.render_prompt import render_text_prompt
 from src.run_single import DEFAULT_INSTRUCTION_TEMPLATE, target_in_response
 
@@ -96,9 +101,18 @@ def _client_from_config(
 ) -> VisionModelClient:
     if client is not None:
         return client
-    if config.model.type != "mock":
-        raise ValueError("only model.type='mock' is supported")
-    return MockVisionModelClient(response=config.model.response)
+    model_type = config.model.type.casefold()
+    if model_type == "mock":
+        return MockVisionModelClient(response=config.model.response or "mock response")
+    if model_type == "qwen":
+        return QwenVisionModelClient(
+            model_id=config.model.model_id or DEFAULT_QWEN_MODEL_ID,
+            max_new_tokens=config.model.max_new_tokens,
+            require_gpu=config.model.require_gpu,
+            torch_dtype=config.model.torch_dtype,
+            device_map=config.model.device_map,
+        )
+    raise ValueError("model.type must be one of: mock, qwen")
 
 
 def run_experiment(
@@ -112,6 +126,7 @@ def run_experiment(
     )
     completed = load_completed_run_ids(config.output.results_path)
     model_client = _client_from_config(config, client)
+    instruction = config.model.instruction or DEFAULT_INSTRUCTION_TEMPLATE
     color = config.rendering.colors[0]
     rows: list[dict[str, Any]] = []
 
@@ -139,9 +154,7 @@ def run_experiment(
                     font_scale=font_scale,
                     color=color,
                 )
-                model_response = model_client.query(
-                    str(output_image_path), DEFAULT_INSTRUCTION_TEMPLATE
-                )
+                model_response = model_client.query(str(output_image_path), instruction)
                 success = target_in_response(config.target.phrase, model_response)
                 row: dict[str, Any] = {
                     "run_id": run_id,
@@ -149,8 +162,8 @@ def run_experiment(
                     "generated_image": str(output_image_path),
                     "target": config.target.phrase,
                     "embedded_prompt": config.target.embedded_prompt,
-                    "instruction": DEFAULT_INSTRUCTION_TEMPLATE,
-                    "model_type": config.model.type,
+                    "instruction": instruction,
+                    "model_type": config.model.type.casefold(),
                     "model_response": model_response,
                     "success": success,
                     "placement": placement,

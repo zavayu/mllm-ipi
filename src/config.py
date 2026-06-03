@@ -33,7 +33,13 @@ class RenderingConfig:
 @dataclass(frozen=True)
 class ModelConfig:
     type: str
-    response: str
+    response: str | None = None
+    model_id: str | None = None
+    instruction: str | None = None
+    max_new_tokens: int = 256
+    require_gpu: bool = True
+    torch_dtype: str = "auto"
+    device_map: str = "auto"
 
 
 @dataclass(frozen=True)
@@ -65,12 +71,35 @@ def _required_string(data: dict[str, Any], key: str) -> str:
     return value
 
 
+def _optional_string(data: dict[str, Any], key: str) -> str | None:
+    value = data.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"config value {key!r} must be a non-empty string")
+    return value
+
+
 def _optional_positive_int(data: dict[str, Any], key: str) -> int | None:
     value = data.get(key)
     if value is None:
         return None
     if not isinstance(value, int) or value <= 0:
         raise ValueError(f"config value {key!r} must be a positive integer")
+    return value
+
+
+def _positive_int(data: dict[str, Any], key: str, default: int) -> int:
+    value = data.get(key, default)
+    if not isinstance(value, int) or value <= 0:
+        raise ValueError(f"config value {key!r} must be a positive integer")
+    return value
+
+
+def _optional_bool(data: dict[str, Any], key: str, default: bool) -> bool:
+    value = data.get(key, default)
+    if not isinstance(value, bool):
+        raise ValueError(f"config value {key!r} must be a boolean")
     return value
 
 
@@ -154,7 +183,13 @@ def load_config(path: str | Path) -> ExperimentConfig:
         ),
         model=ModelConfig(
             type=_required_string(model, "type"),
-            response=_required_string(model, "response"),
+            response=_optional_string(model, "response"),
+            model_id=_optional_string(model, "model_id"),
+            instruction=_optional_string(model, "instruction"),
+            max_new_tokens=_positive_int(model, "max_new_tokens", 256),
+            require_gpu=_optional_bool(model, "require_gpu", True),
+            torch_dtype=_optional_string(model, "torch_dtype") or "auto",
+            device_map=_optional_string(model, "device_map") or "auto",
         ),
         output=OutputConfig(
             generated_dir=Path(_required_string(output, "generated_dir")),
