@@ -38,7 +38,11 @@ def iter_dataset_images(
 
 
 def build_run_id(
-    image_path: str | Path, dataset_dir: str | Path, placement: str, font_scale: float
+    image_path: str | Path,
+    dataset_dir: str | Path,
+    placement: str,
+    font_scale: float,
+    prompt_text: str | None = None,
 ) -> str:
     """Build a stable run id for resume behavior."""
     image = Path(image_path)
@@ -46,7 +50,7 @@ def build_run_id(
         image_key = image.relative_to(dataset_dir).as_posix()
     except ValueError:
         image_key = image.as_posix()
-    raw = f"{image_key}|{placement}|{font_scale:g}"
+    raw = f"{image_key}|{placement}|{font_scale:g}|{prompt_text or ''}"
     digest = sha1(raw.encode("utf-8")).hexdigest()[:12]
     readable = re.sub(r"[^A-Za-z0-9_.-]+", "_", image_key).strip("_")
     return f"{readable}__{placement}__fs_{font_scale:g}__{digest}"
@@ -58,9 +62,10 @@ def generated_image_path(
     dataset_dir: str | Path,
     placement: str,
     font_scale: float,
+    prompt_text: str | None = None,
 ) -> Path:
     """Return the output image path for one run."""
-    run_id = build_run_id(image_path, dataset_dir, placement, font_scale)
+    run_id = build_run_id(image_path, dataset_dir, placement, font_scale, prompt_text)
     return Path(generated_dir) / f"{run_id}.png"
 
 
@@ -115,6 +120,28 @@ def _client_from_config(
     raise ValueError("model.type must be one of: mock, qwen")
 
 
+def _build_adversarial_prompt(
+    config: ExperimentConfig,
+    image_path: Path,
+    model_client: VisionModelClient,
+    object_cache: dict[Path, str],
+) -> tuple[str, str | None]:
+    adaptive_prefix = config.target.adaptive_prefix
+    if not adaptive_prefix.enabled:
+        return config.target.embedded_prompt, None
+
+    if image_path not in object_cache:
+        object_cache[image_path] = model_client.query(
+            str(image_path), adaptive_prefix.object_instruction
+        )
+    detected_objects = object_cache[image_path]
+    prompt = adaptive_prefix.template.format(
+        objs=detected_objects,
+        prompt=config.target.embedded_prompt,
+    )
+    return prompt, detected_objects
+
+
 def run_experiment(
     config: ExperimentConfig,
     *,
@@ -128,13 +155,21 @@ def run_experiment(
     model_client = _client_from_config(config, client)
     instruction = config.model.instruction or DEFAULT_INSTRUCTION_TEMPLATE
     color = config.rendering.colors[0]
+    object_cache: dict[Path, str] = {}
     rows: list[dict[str, Any]] = []
 
     for image_path in image_paths:
+        adversarial_prompt, detected_objects = _build_adversarial_prompt(
+            config, image_path, model_client, object_cache
+        )
         for placement in config.rendering.placements:
             for font_scale in config.rendering.font_scales:
                 run_id = build_run_id(
-                    image_path, config.dataset.image_dir, placement, font_scale
+                    image_path,
+                    config.dataset.image_dir,
+                    placement,
+                    font_scale,
+                    adversarial_prompt,
                 )
                 if run_id in completed:
                     continue
@@ -145,14 +180,16 @@ def run_experiment(
                     config.dataset.image_dir,
                     placement,
                     font_scale,
+                    adversarial_prompt,
                 )
                 render_metadata = render_text_prompt(
                     input_image_path=image_path,
                     output_image_path=output_image_path,
-                    text=config.target.embedded_prompt,
+                    text=adversarial_prompt,
                     placement=placement,
                     font_scale=font_scale,
                     color=color,
+                    max_characters_per_line=(config.rendering.max_characters_per_line),
                 )
                 model_response = model_client.query(str(output_image_path), instruction)
                 success = target_in_response(config.target.phrase, model_response)
@@ -162,6 +199,14 @@ def run_experiment(
                     "generated_image": str(output_image_path),
                     "target": config.target.phrase,
                     "embedded_prompt": config.target.embedded_prompt,
+                    "adversarial_prompt": adversarial_prompt,
+                    "adaptive_prefix_enabled": (config.target.adaptive_prefix.enabled),
+                    "object_instruction": (
+                        config.target.adaptive_prefix.object_instruction
+                        if config.target.adaptive_prefix.enabled
+                        else None
+                    ),
+                    "detected_objects": detected_objects,
                     "instruction": instruction,
                     "model_type": config.model.type.casefold(),
                     "model_response": model_response,
@@ -171,6 +216,11 @@ def run_experiment(
                     "color": list(color),
                     "render_font_size": render_metadata.font_size,
                     "render_text_bbox": list(render_metadata.text_bbox),
+                    "rendered_prompt": render_metadata.rendered_text,
+                    "rendered_prompt_line_count": render_metadata.line_count,
+                    "max_characters_per_line": (
+                        config.rendering.max_characters_per_line
+                    ),
                 }
                 append_jsonl_row(config.output.results_path, row)
                 completed.add(run_id)

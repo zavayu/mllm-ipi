@@ -8,7 +8,6 @@ from typing import NamedTuple
 
 from PIL import Image, ImageDraw, ImageFont
 
-
 SUPPORTED_PLACEMENTS = {"center", "top_right", "bottom_middle"}
 
 
@@ -19,6 +18,8 @@ class RenderMetadata(NamedTuple):
     placement: str
     font_size: int
     text_bbox: tuple[int, int, int, int]
+    rendered_text: str
+    line_count: int
 
 
 def _load_font(font_size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
@@ -70,6 +71,46 @@ def _text_position(
     raise ValueError(f"unsupported placement: {placement}")
 
 
+def _split_long_word(word: str, max_characters_per_line: int) -> list[str]:
+    return [
+        word[index : index + max_characters_per_line]
+        for index in range(0, len(word), max_characters_per_line)
+    ]
+
+
+def _wrap_text_by_character_count(
+    text: str,
+    max_characters_per_line: int | None,
+) -> str:
+    if max_characters_per_line is None:
+        return text
+    if max_characters_per_line <= 0:
+        raise ValueError("max_characters_per_line must be greater than 0")
+
+    wrapped_lines: list[str] = []
+    for source_line in text.splitlines() or [""]:
+        words = source_line.split()
+        if not words:
+            wrapped_lines.append("")
+            continue
+
+        current_line = ""
+        for word in words:
+            chunks = _split_long_word(word, max_characters_per_line)
+            for chunk in chunks:
+                if not current_line:
+                    current_line = chunk
+                elif len(current_line) + 1 + len(chunk) <= max_characters_per_line:
+                    current_line = f"{current_line} {chunk}"
+                else:
+                    wrapped_lines.append(current_line)
+                    current_line = chunk
+        if current_line:
+            wrapped_lines.append(current_line)
+
+    return "\n".join(wrapped_lines)
+
+
 def render_text_prompt(
     input_image_path: str | Path,
     output_image_path: str | Path,
@@ -77,6 +118,7 @@ def render_text_prompt(
     placement: str,
     font_scale: float,
     color: tuple[int, int, int] = (255, 0, 0),
+    max_characters_per_line: int | None = None,
 ) -> RenderMetadata:
     """Render visible text onto an image and save the result."""
     if placement not in SUPPORTED_PLACEMENTS:
@@ -96,15 +138,30 @@ def render_text_prompt(
     font_size = max(1, round(min(rendered.size) * font_scale))
     font = _load_font(font_size)
     draw = ImageDraw.Draw(rendered)
+    line_spacing = max(1, round(font_size * 0.2))
+    rendered_text = _wrap_text_by_character_count(text, max_characters_per_line)
+    line_count = rendered_text.count("\n") + 1
 
-    raw_bbox = draw.textbbox((0, 0), text, font=font)
+    raw_bbox = draw.multiline_textbbox(
+        (0, 0), rendered_text, font=font, spacing=line_spacing
+    )
     text_width = raw_bbox[2] - raw_bbox[0]
     text_height = raw_bbox[3] - raw_bbox[1]
-    target_x, target_y = _text_position(rendered.size, (text_width, text_height), placement)
+    target_x, target_y = _text_position(
+        rendered.size, (text_width, text_height), placement
+    )
     draw_position = (target_x - raw_bbox[0], target_y - raw_bbox[1])
 
-    draw.text(draw_position, text, fill=color, font=font)
-    text_bbox = draw.textbbox(draw_position, text, font=font)
+    draw.multiline_text(
+        draw_position,
+        rendered_text,
+        fill=color,
+        font=font,
+        spacing=line_spacing,
+    )
+    text_bbox = draw.multiline_textbbox(
+        draw_position, rendered_text, font=font, spacing=line_spacing
+    )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     rendered.save(output_path)
@@ -114,13 +171,19 @@ def render_text_prompt(
         placement=placement,
         font_size=font_size,
         text_bbox=tuple(int(value) for value in text_bbox),
+        rendered_text=rendered_text,
+        line_count=line_count,
     )
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Render visible prompt text onto an image.")
+    parser = argparse.ArgumentParser(
+        description="Render visible prompt text onto an image."
+    )
     parser.add_argument("--input", required=True, help="Path to the input image.")
-    parser.add_argument("--output", required=True, help="Path for the rendered output image.")
+    parser.add_argument(
+        "--output", required=True, help="Path for the rendered output image."
+    )
     parser.add_argument("--text", required=True, help="Text to render onto the image.")
     parser.add_argument(
         "--placement",
@@ -140,6 +203,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=_parse_color,
         help="Text color as R,G,B. Defaults to 255,0,0.",
     )
+    parser.add_argument(
+        "--max-characters-per-line",
+        type=int,
+        help="Wrap rendered text after this many characters per line.",
+    )
     return parser
 
 
@@ -153,11 +221,13 @@ def main(argv: list[str] | None = None) -> int:
         placement=args.placement,
         font_scale=args.font_scale,
         color=args.color,
+        max_characters_per_line=args.max_characters_per_line,
     )
     print(f"output_path={metadata.output_path}")
     print(f"placement={metadata.placement}")
     print(f"font_size={metadata.font_size}")
     print(f"text_bbox={metadata.text_bbox}")
+    print(f"line_count={metadata.line_count}")
     return 0
 
 
