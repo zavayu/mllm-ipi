@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from src import query_model
+from src.model_clients import QWEN25_VL_FAMILY, QWEN3_VL_FAMILY
 from src.model_clients import QwenVisionModelClient, VisionModelClient
 from src.model_clients import qwen_client
 
@@ -53,6 +54,18 @@ class FakeProcessor:
         return [" decoded answer "]
 
 
+class FakeQwen3Processor(FakeProcessor):
+    qwen3_chat_template_calls = []
+
+    def apply_chat_template(self, messages, **kwargs):
+        self.__class__.qwen3_chat_template_calls.append((messages, kwargs))
+        assert kwargs["tokenize"] is True
+        assert kwargs["add_generation_prompt"] is True
+        assert kwargs["return_dict"] is True
+        assert kwargs["return_tensors"] == "pt"
+        return FakeInputs()
+
+
 class FakeModel:
     from_pretrained_calls = []
 
@@ -86,6 +99,8 @@ def reset_fakes():
     FakeProcessor.from_pretrained_calls = []
     FakeProcessor.last_inputs = None
     FakeProcessor.last_messages = None
+    FakeQwen3Processor.from_pretrained_calls = []
+    FakeQwen3Processor.qwen3_chat_template_calls = []
     FakeModel.from_pretrained_calls = []
 
 
@@ -128,6 +143,67 @@ def test_qwen_client_query_loads_model_once_and_decodes(monkeypatch, tmp_path):
         )
     ]
     assert client._processor.last_inputs.moved_to == "cuda"
+    assert client._resolved_model_family == QWEN25_VL_FAMILY
+
+
+def test_qwen_client_auto_detects_qwen3_and_decodes(monkeypatch, tmp_path):
+    image = tmp_path / "example.png"
+    image.write_bytes(b"not a real png; tests mock image processing")
+    monkeypatch.setattr(qwen_client, "_import_torch", lambda: fake_torch(True))
+    monkeypatch.setattr(
+        qwen_client,
+        "_import_qwen3_libraries",
+        lambda: (FakeQwen3Processor, FakeModel),
+    )
+    client = QwenVisionModelClient(
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        model_family="auto",
+        max_new_tokens=7,
+    )
+
+    assert client.query(str(image), "Describe this image.") == "decoded answer"
+    assert client._resolved_model_family == QWEN3_VL_FAMILY
+    assert FakeQwen3Processor.from_pretrained_calls == ["Qwen/Qwen3-VL-4B-Instruct"]
+    assert FakeModel.from_pretrained_calls == [
+        (
+            "Qwen/Qwen3-VL-4B-Instruct",
+            {"torch_dtype": "auto", "device_map": "auto"},
+        )
+    ]
+    messages, _kwargs = FakeQwen3Processor.qwen3_chat_template_calls[0]
+    assert messages[0]["content"] == [
+        {"type": "image", "image": str(image)},
+        {"type": "text", "text": "Describe this image."},
+    ]
+
+
+def test_qwen_client_accepts_explicit_qwen3_family(monkeypatch, tmp_path):
+    image = tmp_path / "example.png"
+    image.write_bytes(b"not a real png; tests mock image processing")
+    monkeypatch.setattr(qwen_client, "_import_torch", lambda: fake_torch(True))
+    monkeypatch.setattr(
+        qwen_client,
+        "_import_qwen3_libraries",
+        lambda: (FakeQwen3Processor, FakeModel),
+    )
+    client = QwenVisionModelClient(
+        model_id="some/local/path",
+        model_family=QWEN3_VL_FAMILY,
+        max_new_tokens=7,
+    )
+
+    assert client.query(str(image), "Describe this image.") == "decoded answer"
+    assert client._resolved_model_family == QWEN3_VL_FAMILY
+
+
+def test_qwen_client_rejects_unknown_family(monkeypatch, tmp_path):
+    image = tmp_path / "example.png"
+    image.write_bytes(b"image")
+    monkeypatch.setattr(qwen_client, "_import_torch", lambda: fake_torch(True))
+    client = QwenVisionModelClient(model_id="test/model", model_family="not-real")
+
+    with pytest.raises(ValueError, match="unsupported Qwen model family"):
+        client.query(str(image), "Describe this image.")
 
 
 def test_qwen_client_allows_empty_instruction(monkeypatch, tmp_path):
@@ -189,7 +265,48 @@ def test_query_model_cli_prints_response(monkeypatch, capsys):
     assert created_clients == [
         {
             "model_id": "Qwen/Qwen2.5-VL-3B-Instruct",
+            "model_family": "auto",
             "max_new_tokens": 256,
+            "require_gpu": True,
+        }
+    ]
+
+
+def test_query_model_cli_accepts_qwen3_family(monkeypatch, capsys):
+    created_clients = []
+
+    class FakeQwenVisionModelClient:
+        def __init__(self, **kwargs):
+            created_clients.append(kwargs)
+
+        def query(self, image_path, instruction):
+            return f"{image_path}: {instruction}"
+
+    monkeypatch.setattr(query_model, "QwenVisionModelClient", FakeQwenVisionModelClient)
+
+    result = query_model.main(
+        [
+            "--image",
+            "data/generated/example.png",
+            "--instruction",
+            "Describe this image.",
+            "--model-id",
+            "Qwen/Qwen3-VL-4B-Instruct",
+            "--model-family",
+            "qwen3-vl",
+            "--max-new-tokens",
+            "32",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert captured.out == "data/generated/example.png: Describe this image.\n"
+    assert created_clients == [
+        {
+            "model_id": "Qwen/Qwen3-VL-4B-Instruct",
+            "model_family": "qwen3-vl",
+            "max_new_tokens": 32,
             "require_gpu": True,
         }
     ]
