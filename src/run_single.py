@@ -135,7 +135,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--target", required=True, help="Target phrase to render and detect."
     )
-    parser.add_argument("--embedded-prompt", help="Text to render; defaults to --target.")
+    parser.add_argument(
+        "--embedded-prompt", help="Text to render; defaults to --target."
+    )
     parser.add_argument("--instruction", default=DEFAULT_INSTRUCTION_TEMPLATE)
     parser.add_argument(
         "--out-dir", required=True, help="Directory for the generated image."

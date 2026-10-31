@@ -89,10 +89,11 @@ def generate_candidate_masks(
     points_per_side: int = 32,
     pred_iou_thresh: float = 0.88,
     stability_score_thresh: float = 0.95,
+    backend: str = "auto",
 ) -> list[np.ndarray]:
     """Generate candidate masks with SAM when configured, otherwise fallback masks."""
-    checkpoint = sam_checkpoint or os.getenv("SAM_CHECKPOINT")
-    if checkpoint:
+    resolved_backend, checkpoint = resolve_segmentation(backend, sam_checkpoint)
+    if resolved_backend == "sam":
         return _generate_sam_masks(
             image=image,
             checkpoint=checkpoint,
@@ -102,6 +103,17 @@ def generate_candidate_masks(
             stability_score_thresh=stability_score_thresh,
         )
     return _grid_fallback_masks(image)
+
+
+def resolve_segmentation(backend: str = "auto", checkpoint: str | Path | None = None) -> tuple[str, Path | None]:
+    if backend not in {"auto", "sam", "grid"}:
+        raise ValueError("mask backend must be auto, sam, or grid")
+    if backend == "grid":
+        return "grid", None
+    checkpoint = checkpoint or os.getenv("SAM_CHECKPOINT")
+    if backend == "sam" and not checkpoint:
+        raise ValueError("SAM backend requires a checkpoint; grid fallback is not allowed")
+    return ("sam", Path(checkpoint)) if checkpoint else ("grid", None)
 
 
 def _draw_rank_label(

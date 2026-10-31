@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from contextlib import nullcontext
 
 import pytest
 
@@ -26,7 +27,7 @@ class FakeProcessor:
     last_messages = None
 
     @classmethod
-    def from_pretrained(cls, model_id):
+    def from_pretrained(cls, model_id, **kwargs):
         cls.from_pretrained_calls.append(model_id)
         return cls()
 
@@ -80,6 +81,8 @@ class FakeModel:
     def generate(self, **kwargs):
         assert kwargs["input_ids"] == [[1, 2, 3]]
         assert kwargs["max_new_tokens"] == 7
+        assert kwargs["do_sample"] is False
+        assert kwargs["num_beams"] == 1
         return [[1, 2, 3, 4, 5]]
 
 
@@ -91,6 +94,8 @@ def fake_process_vision_info(messages):
 def fake_torch(cuda_available=True):
     return SimpleNamespace(
         cuda=SimpleNamespace(is_available=lambda: cuda_available),
+        manual_seed=lambda seed: None,
+        inference_mode=nullcontext,
     )
 
 
@@ -119,6 +124,22 @@ def test_qwen_client_is_lazy_until_query(monkeypatch):
     QwenVisionModelClient(model_id="test/model")
 
 
+def test_sampling_parameters_and_seed_are_explicit(monkeypatch):
+    calls = []
+    seeds = []
+    client = QwenVisionModelClient(do_sample=True, temperature=0.7, top_p=0.9, seed=12)
+    client._torch = SimpleNamespace(manual_seed=seeds.append, inference_mode=nullcontext,
+                                   cuda=SimpleNamespace(is_available=lambda: False))
+    client._model = SimpleNamespace(generate=lambda **kw: calls.append(kw) or [[1, 2, 3, 4, 5]])
+    client._processor = FakeProcessor()
+    client._generate_and_decode(FakeInputs())
+    assert seeds == [12]
+    assert calls[0]["do_sample"] is True
+    assert calls[0]["temperature"] == 0.7
+    assert calls[0]["top_p"] == 0.9
+    assert calls[0]["top_k"] == 0
+
+
 def test_qwen_client_query_loads_model_once_and_decodes(monkeypatch, tmp_path):
     image = tmp_path / "example.png"
     image.write_bytes(b"not a real png; tests mock image processing")
@@ -139,7 +160,7 @@ def test_qwen_client_query_loads_model_once_and_decodes(monkeypatch, tmp_path):
     assert FakeModel.from_pretrained_calls == [
         (
             "test/model",
-            {"torch_dtype": "auto", "device_map": "auto"},
+            {"torch_dtype": "auto", "device_map": "auto", "revision": "main"},
         )
     ]
     assert client._processor.last_inputs.moved_to == "cuda"
@@ -167,7 +188,7 @@ def test_qwen_client_auto_detects_qwen3_and_decodes(monkeypatch, tmp_path):
     assert FakeModel.from_pretrained_calls == [
         (
             "Qwen/Qwen3-VL-4B-Instruct",
-            {"torch_dtype": "auto", "device_map": "auto"},
+            {"torch_dtype": "auto", "device_map": "auto", "revision": "main"},
         )
     ]
     messages, _kwargs = FakeQwen3Processor.qwen3_chat_template_calls[0]

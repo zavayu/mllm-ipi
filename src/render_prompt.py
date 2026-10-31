@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from hashlib import sha256
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -86,6 +87,13 @@ def _load_font(font_size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
         except OSError:
             continue
     return ImageFont.load_default()
+
+
+def font_provenance() -> dict[str, object]:
+    font = _load_font(16)
+    path = getattr(font, "path", None)
+    return {"name": list(font.getname()), "path": str(path) if path else None,
+            "sha256": sha256(Path(path).read_bytes()).hexdigest() if path and Path(path).is_file() else None}
 
 
 def _parse_color(value: str) -> tuple[int, int, int]:

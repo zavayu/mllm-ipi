@@ -89,6 +89,13 @@ class QwenVisionModelClient:
     require_gpu: bool = True
     torch_dtype: str = "auto"
     device_map: str = "auto"
+    revision: str = "main"
+    do_sample: bool = False
+    temperature: float = 1.0
+    top_p: float = 1.0
+    seed: int = 0
+    min_pixels: int | None = None
+    max_pixels: int | None = None
     _model: Any = field(default=None, init=False, repr=False)
     _processor: Any = field(default=None, init=False, repr=False)
     _process_vision_info: Any = field(default=None, init=False, repr=False)
@@ -135,9 +142,18 @@ class QwenVisionModelClient:
         if hasattr(inputs, "to"):
             inputs = inputs.to(self._input_device())
 
-        generated_ids = self._model.generate(
-            **inputs, max_new_tokens=self.max_new_tokens
-        )
+        if self.do_sample:
+            self._torch.manual_seed(self.seed)
+        with self._torch.inference_mode():
+            generated_ids = self._model.generate(
+                **inputs,
+                max_new_tokens=self.max_new_tokens,
+                do_sample=self.do_sample,
+                num_beams=1,
+                temperature=self.temperature if self.do_sample else None,
+                top_p=self.top_p if self.do_sample else None,
+                top_k=0 if self.do_sample else None,
+            )
         generated_ids_trimmed = [
             output_ids[len(input_ids) :]
             for input_ids, output_ids in zip(inputs.input_ids, generated_ids)
@@ -173,9 +189,18 @@ class QwenVisionModelClient:
                 self.model_id,
                 torch_dtype=self.torch_dtype,
                 device_map=self.device_map,
+                revision=self.revision,
             )
             if hasattr(self._model, "eval"):
                 self._model.eval()
+            resolved = getattr(
+                getattr(self._model, "config", None), "_commit_hash", None
+            )
+            if resolved and resolved != self.revision:
+                # Re-load the processor at the weights' exact revision, not a moving branch.
+                self._processor = self._processor_class.from_pretrained(
+                    self.model_id, revision=resolved, **self._processor_options()
+                )
         except Exception as exc:
             raise RuntimeError(
                 f"failed to load {self._resolved_model_family} model "
@@ -186,10 +211,47 @@ class QwenVisionModelClient:
     def _load_hugging_face_classes(self) -> tuple[Any, Any]:
         if self._resolved_model_family == QWEN3_VL_FAMILY:
             AutoProcessor, model_class = _import_qwen3_libraries()
-            return AutoProcessor.from_pretrained(self.model_id), model_class
+        else:
+            AutoProcessor, model_class, self._process_vision_info = (
+                _import_qwen_libraries()
+            )
+        self._processor_class = AutoProcessor
+        return (
+            AutoProcessor.from_pretrained(
+                self.model_id, revision=self.revision, **self._processor_options()
+            ),
+            model_class,
+        )
 
-        AutoProcessor, model_class, self._process_vision_info = _import_qwen_libraries()
-        return AutoProcessor.from_pretrained(self.model_id), model_class
+    def _processor_options(self) -> dict[str, int]:
+        return {
+            key: value
+            for key, value in {
+                "min_pixels": self.min_pixels,
+                "max_pixels": self.max_pixels,
+            }.items()
+            if value is not None
+        }
+
+    def provenance(self) -> dict[str, Any]:
+        """Load once and record the actual weights and preprocessing configuration."""
+        self._ensure_loaded()
+        image_processor = getattr(self._processor, "image_processor", None)
+        generation_config = getattr(self._model, "generation_config", None)
+        return {
+            "resolved_revision": getattr(
+                getattr(self._model, "config", None), "_commit_hash", None
+            ),
+            "resolved_family": self._resolved_model_family,
+            "actual_dtype": str(getattr(self._model, "dtype", "unknown")),
+            "processor": (
+                image_processor.to_dict() if image_processor is not None else {}
+            ),
+            "chat_template": getattr(self._processor, "chat_template", None),
+            "generation_config": (
+                generation_config.to_dict() if generation_config is not None else {}
+            ),
+        }
 
     def _input_device(self) -> str:
         if self._torch is not None and self._torch.cuda.is_available():

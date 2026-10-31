@@ -14,7 +14,6 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-
 SUMMARY_CSV_NAME = "summary.csv"
 FONT_SCALE_PLOT_NAME = "asr_by_font_scale.png"
 
@@ -44,7 +43,9 @@ def read_jsonl_results(path: str | Path) -> list[dict[str, Any]]:
 def _success_value(row: dict[str, Any], metric: str) -> bool:
     value = row.get(metric)
     if not isinstance(value, bool):
-        raise ValueError(f"each completed result row must contain a boolean '{metric}' value; legacy logs require --metric success")
+        raise ValueError(
+            f"each completed result row must contain a boolean '{metric}' value; legacy logs require --metric success"
+        )
     return value
 
 
@@ -68,7 +69,9 @@ def _group_value(row: dict[str, Any], key: str) -> str:
     return str(value)
 
 
-def _summary_row(group: str, value: str, rows: list[dict[str, Any]], metric: str) -> dict[str, Any]:
+def _summary_row(
+    group: str, value: str, rows: list[dict[str, Any]], metric: str
+) -> dict[str, Any]:
     successes = sum(1 for row in rows if _success_value(row, metric))
     total = len(rows)
     asr = successes / total if total else 0.0
@@ -82,9 +85,14 @@ def _summary_row(group: str, value: str, rows: list[dict[str, Any]], metric: str
     }
 
 
-def compute_summary(rows: list[dict[str, Any]], metric: str = "exact_target_response") -> list[dict[str, Any]]:
+def compute_summary(
+    rows: list[dict[str, Any]], metric: str = "exact_target_response"
+) -> list[dict[str, Any]]:
     """Compute overall and grouped attack success rates."""
     rows = [row for row in rows if row.get("status", "completed") == "completed"]
+    identities = {row["experiment_id"] for row in rows if "experiment_id" in row}
+    if len(identities) > 1:
+        raise ValueError("results contain multiple experiments; select --experiment-id before summarizing")
     if not rows:
         raise ValueError("results file contains no rows")
 
@@ -137,31 +145,51 @@ def plot_asr_by_font_scale(summary: list[dict[str, Any]], path: str | Path) -> N
     plt.close(fig)
 
 
-def evaluate_results(results_path: str | Path, out_dir: str | Path, metric: str = "exact_target_response") -> dict[str, Path]:
+def evaluate_results(
+    results_path: str | Path, out_dir: str | Path, metric: str = "exact_target_response",
+    experiment_id: str | None = None,
+) -> dict[str, Path]:
     """Evaluate a JSONL results file and write summary artifacts."""
     output_dir = Path(out_dir)
     rows = read_jsonl_results(results_path)
-    summary = compute_summary(rows, metric)
+    if experiment_id is not None:
+        rows = [row for row in rows if row.get("experiment_id") == experiment_id]
+    completed = {row.get("run_id", f"legacy-{i}"): row for i, row in enumerate(rows) if row.get("status", "completed") == "completed"}
+    summary = compute_summary(list(completed.values()), metric)
 
     summary_csv = output_dir / SUMMARY_CSV_NAME
     font_scale_plot = output_dir / FONT_SCALE_PLOT_NAME
     write_summary_csv(summary_csv, summary)
     plot_asr_by_font_scale(summary, font_scale_plot)
+    counts_path = output_dir / "attempts.json"
+    counts_path.write_text(json.dumps({"completed_trials": len(completed), "failed_attempts": sum(row.get("status") == "error" for row in rows), "metric": metric}, indent=2) + "\n", encoding="utf-8")
     return {"summary_csv": summary_csv, "font_scale_plot": font_scale_plot}
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Evaluate JSONL experiment results.")
     parser.add_argument("--results", required=True, help="Path to JSONL results file.")
-    parser.add_argument("--out-dir", required=True, help="Directory for summary outputs.")
-    parser.add_argument("--metric", choices=["exact_target_response", "target_containment", "task_success", "success"], default="exact_target_response")
+    parser.add_argument(
+        "--out-dir", required=True, help="Directory for summary outputs."
+    )
+    parser.add_argument(
+        "--metric",
+        choices=[
+            "exact_target_response",
+            "target_containment",
+            "task_success",
+            "success",
+        ],
+        default="exact_target_response",
+    )
+    parser.add_argument("--experiment-id", help="Select one manifest identity from a shared results file.")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    outputs = evaluate_results(args.results, args.out_dir, args.metric)
+    outputs = evaluate_results(args.results, args.out_dir, args.metric, args.experiment_id)
     print(f"summary_csv={outputs['summary_csv']}")
     print(f"font_scale_plot={outputs['font_scale_plot']}")
     return 0

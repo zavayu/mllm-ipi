@@ -150,10 +150,12 @@ def test_legacy_logs_require_explicit_metric():
 
 
 def test_failures_do_not_count_as_completed_trials():
-    summary = compute_summary([
-        {"exact_target_response": True, "status": "completed"},
-        {"status": "error", "error": "query failed"},
-    ])
+    summary = compute_summary(
+        [
+            {"exact_target_response": True, "status": "completed"},
+            {"status": "error", "error": "query failed"},
+        ]
+    )
     assert summary[0]["total"] == 1
 
 

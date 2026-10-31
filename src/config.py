@@ -70,6 +70,7 @@ class RenderingConfig:
     points_per_side: int = 32
     pred_iou_thresh: float = 0.88
     stability_score_thresh: float = 0.95
+    mask_backend: str = "auto"
 
 
 @dataclass(frozen=True)
@@ -82,6 +83,20 @@ class ModelConfig:
     require_gpu: bool = True
     torch_dtype: str = "auto"
     device_map: str = "auto"
+    revision: str = "main"
+    do_sample: bool = False
+    temperature: float = 1.0
+    top_p: float = 1.0
+    seed: int = 0
+    min_pixels: int | None = None
+    max_pixels: int | None = None
+
+
+@dataclass(frozen=True)
+class EvaluationConfig:
+    condition: str = "paper_image_only"
+    repetitions: int = 1
+    task_expected_response: str | None = None
 
 
 @dataclass(frozen=True)
@@ -97,6 +112,24 @@ class ExperimentConfig:
     rendering: RenderingConfig
     model: ModelConfig
     output: OutputConfig
+    evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
+
+    def __post_init__(self) -> None:
+        condition = self.evaluation.condition
+        if condition not in {"clean", "paper_image_only", "task_override"}:
+            raise ValueError("unknown evaluation condition")
+        if condition == "paper_image_only" and self.model.instruction:
+            raise ValueError("paper_image_only requires an empty model.instruction")
+        if condition == "task_override" and not (self.model.instruction or "").strip():
+            raise ValueError("task_override requires a nonblank model.instruction")
+        if self.evaluation.repetitions < 1 or (self.evaluation.repetitions > 1 and not self.model.do_sample):
+            raise ValueError("repetitions > 1 requires model.do_sample=true")
+        if self.model.seed < 0:
+            raise ValueError("model.seed must be nonnegative")
+        if self.model.type not in {"mock", "qwen"}:
+            raise ValueError("model.type must be mock or qwen")
+        if self.evaluation.task_expected_response is not None and not self.evaluation.task_expected_response.strip():
+            raise ValueError("task_expected_response cannot be blank")
 
 
 def _required_mapping(data: dict[str, Any], key: str) -> dict[str, Any]:
@@ -223,6 +256,49 @@ def load_config(path: str | Path) -> ExperimentConfig:
     rendering = _required_mapping(raw, "rendering")
     model = _required_mapping(raw, "model")
     output = _required_mapping(raw, "output")
+    evaluation = raw.get("evaluation", {})
+    if not isinstance(evaluation, dict):
+        raise ValueError("evaluation must be a mapping")
+    condition = evaluation.get("condition", "paper_image_only")
+    if condition not in {"clean", "paper_image_only", "task_override"}:
+        raise ValueError(
+            "evaluation.condition must be clean, paper_image_only, or task_override"
+        )
+    instruction = _optional_string(model, "instruction", allow_empty=True)
+    if condition == "paper_image_only" and instruction:
+        raise ValueError(
+            "paper_image_only requires an empty model.instruction; use task_override"
+        )
+    if condition == "task_override" and not (instruction or "").strip():
+        raise ValueError("task_override requires a nonblank model.instruction")
+    if (
+        _positive_float(model, "temperature", 1.0) <= 0
+        or not 0 < _float(model, "top_p", 1.0) <= 1
+    ):
+        raise ValueError("temperature must be positive and top_p must be in (0, 1]")
+    if rendering.get("color_strategy", "static") not in {
+        "static",
+        "top_ranked_mask_average",
+        "multi_mask_average",
+        "adaptive_mask_average",
+    }:
+        raise ValueError("unsupported rendering.color_strategy")
+    if rendering.get("mask_backend", "auto") not in {"auto", "sam", "grid"}:
+        raise ValueError("rendering.mask_backend must be auto, sam, or grid")
+    if (
+        _required_string(target, "phrase").strip() == ""
+        or _required_string(target, "embedded_prompt").strip() == ""
+    ):
+        raise ValueError("target phrase and embedded_prompt cannot be blank")
+    repetitions = _positive_int(evaluation, "repetitions", 1)
+    if repetitions > 1 and not _optional_bool(model, "do_sample", False):
+        raise ValueError(
+            "repetitions > 1 requires model.do_sample=true; deterministic trials run once"
+        )
+    min_pixels = _optional_positive_int(model, "min_pixels")
+    max_pixels = _optional_positive_int(model, "max_pixels")
+    if min_pixels and max_pixels and min_pixels > max_pixels:
+        raise ValueError("min_pixels must be <= max_pixels")
 
     placements = _string_sequence(rendering, "placements")
     unsupported = sorted(set(placements) - SUPPORTED_PLACEMENTS)
@@ -263,19 +339,34 @@ def load_config(path: str | Path) -> ExperimentConfig:
             points_per_side=_positive_int(rendering, "points_per_side", 32),
             pred_iou_thresh=_float(rendering, "pred_iou_thresh", 0.88),
             stability_score_thresh=_float(rendering, "stability_score_thresh", 0.95),
+            mask_backend=_optional_string(rendering, "mask_backend") or "auto",
         ),
         model=ModelConfig(
             type=_required_string(model, "type"),
             response=_optional_string(model, "response"),
             model_id=_optional_string(model, "model_id"),
-            instruction=_optional_string(model, "instruction", allow_empty=True),
+            instruction=instruction,
             max_new_tokens=_positive_int(model, "max_new_tokens", 256),
             require_gpu=_optional_bool(model, "require_gpu", True),
             torch_dtype=_optional_string(model, "torch_dtype") or "auto",
             device_map=_optional_string(model, "device_map") or "auto",
+            revision=_optional_string(model, "revision") or "main",
+            do_sample=_optional_bool(model, "do_sample", False),
+            temperature=_positive_float(model, "temperature", 1.0),
+            top_p=_float(model, "top_p", 1.0),
+            seed=_int(model, "seed", 0),
+            min_pixels=min_pixels,
+            max_pixels=max_pixels,
         ),
         output=OutputConfig(
             generated_dir=Path(_required_string(output, "generated_dir")),
             results_path=Path(_required_string(output, "results_path")),
+        ),
+        evaluation=EvaluationConfig(
+            condition=condition,
+            repetitions=repetitions,
+            task_expected_response=_optional_string(
+                evaluation, "task_expected_response"
+            ),
         ),
     )
