@@ -92,7 +92,9 @@ def compute_summary(
     rows = [row for row in rows if row.get("status", "completed") == "completed"]
     identities = {row["experiment_id"] for row in rows if "experiment_id" in row}
     if len(identities) > 1:
-        raise ValueError("results contain multiple experiments; select --experiment-id before summarizing")
+        raise ValueError(
+            "results contain multiple experiments; select --experiment-id before summarizing"
+        )
     if not rows:
         raise ValueError("results file contains no rows")
 
@@ -146,7 +148,9 @@ def plot_asr_by_font_scale(summary: list[dict[str, Any]], path: str | Path) -> N
 
 
 def evaluate_results(
-    results_path: str | Path, out_dir: str | Path, metric: str = "exact_target_response",
+    results_path: str | Path,
+    out_dir: str | Path,
+    metric: str = "exact_target_response",
     experiment_id: str | None = None,
 ) -> dict[str, Path]:
     """Evaluate a JSONL results file and write summary artifacts."""
@@ -154,7 +158,11 @@ def evaluate_results(
     rows = read_jsonl_results(results_path)
     if experiment_id is not None:
         rows = [row for row in rows if row.get("experiment_id") == experiment_id]
-    completed = {row.get("run_id", f"legacy-{i}"): row for i, row in enumerate(rows) if row.get("status", "completed") == "completed"}
+    completed = {
+        row.get("run_id", f"legacy-{i}"): row
+        for i, row in enumerate(rows)
+        if row.get("status", "completed") == "completed"
+    }
     summary = compute_summary(list(completed.values()), metric)
 
     summary_csv = output_dir / SUMMARY_CSV_NAME
@@ -162,7 +170,18 @@ def evaluate_results(
     write_summary_csv(summary_csv, summary)
     plot_asr_by_font_scale(summary, font_scale_plot)
     counts_path = output_dir / "attempts.json"
-    counts_path.write_text(json.dumps({"completed_trials": len(completed), "failed_attempts": sum(row.get("status") == "error" for row in rows), "metric": metric}, indent=2) + "\n", encoding="utf-8")
+    counts_path.write_text(
+        json.dumps(
+            {
+                "completed_trials": len(completed),
+                "failed_attempts": sum(row.get("status") == "error" for row in rows),
+                "metric": metric,
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     return {"summary_csv": summary_csv, "font_scale_plot": font_scale_plot}
 
 
@@ -182,14 +201,19 @@ def build_parser() -> argparse.ArgumentParser:
         ],
         default="exact_target_response",
     )
-    parser.add_argument("--experiment-id", help="Select one manifest identity from a shared results file.")
+    parser.add_argument(
+        "--experiment-id",
+        help="Select one manifest identity from a shared results file.",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    outputs = evaluate_results(args.results, args.out_dir, args.metric, args.experiment_id)
+    outputs = evaluate_results(
+        args.results, args.out_dir, args.metric, args.experiment_id
+    )
     print(f"summary_csv={outputs['summary_csv']}")
     print(f"font_scale_plot={outputs['font_scale_plot']}")
     return 0

@@ -87,7 +87,9 @@ def _rank_masks(
 ) -> tuple[list[RegionFeatures], Path | None]:
     image = _load_rgb_array(image_path)
     sam_checkpoint = os.getenv("SAM_CHECKPOINT") if use_sam else None
-    masks = generate_candidate_masks(image, sam_checkpoint=sam_checkpoint)
+    masks = generate_candidate_masks(
+        image, sam_checkpoint=sam_checkpoint, backend="sam" if use_sam else "grid"
+    )
     ranked_regions = compute_and_rank_regions(image, masks)
     if not ranked_regions:
         return ranked_regions, None

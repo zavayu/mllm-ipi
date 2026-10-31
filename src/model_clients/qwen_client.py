@@ -101,6 +101,7 @@ class QwenVisionModelClient:
     _process_vision_info: Any = field(default=None, init=False, repr=False)
     _torch: Any = field(default=None, init=False, repr=False)
     _resolved_model_family: str | None = field(default=None, init=False, repr=False)
+    last_input_metadata: dict[str, Any] = field(default_factory=dict, init=False)
 
     def query(self, image_path: str, instruction: str) -> str:
         """Return the Qwen VL response for an image and instruction."""
@@ -139,6 +140,13 @@ class QwenVisionModelClient:
         return self._generate_and_decode(inputs)
 
     def _generate_and_decode(self, inputs: Any) -> str:
+        grid = getattr(inputs, "image_grid_thw", None)
+        pixels = getattr(inputs, "pixel_values", None)
+        self.last_input_metadata = {
+            "image_grid_thw": grid.tolist() if grid is not None else None,
+            "pixel_values_shape": list(pixels.shape) if pixels is not None else None,
+            "input_tokens": len(inputs.input_ids[0]),
+        }
         if hasattr(inputs, "to"):
             inputs = inputs.to(self._input_device())
 
@@ -244,6 +252,7 @@ class QwenVisionModelClient:
             ),
             "resolved_family": self._resolved_model_family,
             "actual_dtype": str(getattr(self._model, "dtype", "unknown")),
+            "device_map": getattr(self._model, "hf_device_map", None),
             "processor": (
                 image_processor.to_dict() if image_processor is not None else {}
             ),

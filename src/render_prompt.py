@@ -5,7 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 from hashlib import sha256
-from dataclasses import dataclass
+from math import ceil
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -72,6 +73,10 @@ class RenderMetadata:
     chunk_metadata_path: str | None = None
     visualization_path: str | None = None
     adaptive_fallback_used: bool | None = None
+    requested_font_scale: float | None = None
+    actual_font_scale: float | None = None
+    font_name: str | None = None
+    fit_status: str = "fit"
 
 
 def _load_font(font_size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
@@ -86,14 +91,21 @@ def _load_font(font_size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
             return ImageFont.truetype(font_name, font_size)
         except OSError:
             continue
-    return ImageFont.load_default()
+    return ImageFont.load_default(size=font_size)
 
 
 def font_provenance() -> dict[str, object]:
     font = _load_font(16)
     path = getattr(font, "path", None)
-    return {"name": list(font.getname()), "path": str(path) if path else None,
-            "sha256": sha256(Path(path).read_bytes()).hexdigest() if path and Path(path).is_file() else None}
+    return {
+        "name": list(font.getname()),
+        "path": str(path) if path else None,
+        "sha256": (
+            sha256(Path(path).read_bytes()).hexdigest()
+            if path and Path(path).is_file()
+            else None
+        ),
+    }
 
 
 def _parse_color(value: str) -> tuple[int, int, int]:
@@ -179,24 +191,10 @@ def _wrap_text_by_character_count(
     return "\n".join(wrapped_lines)
 
 
-def _split_text_into_chunks(text: str, chunk_count: int) -> list[str]:
-    if chunk_count <= 0:
-        raise ValueError("chunk_count must be greater than 0")
-
-    words = text.split()
-    if not words:
-        return [""]
-
-    chunk_count = min(chunk_count, len(words))
-    base_size, remainder = divmod(len(words), chunk_count)
-    chunks: list[str] = []
-    cursor = 0
-    for index in range(chunk_count):
-        size = base_size + (1 if index < remainder else 0)
-        chunk_words = words[cursor : cursor + size]
-        chunks.append(" ".join(chunk_words))
-        cursor += size
-    return chunks
+def _rectangles_overlap(a, b):
+    return max(a[0], b[0]) < min(a[0] + a[2], b[0] + b[2]) and max(a[1], b[1]) < min(
+        a[1] + a[3], b[1] + b[3]
+    )
 
 
 def _reading_order_regions(
@@ -206,8 +204,8 @@ def _reading_order_regions(
     return sorted(
         regions,
         key=lambda region: (
-            region.bbox[1],
-            region.bbox[0],
+            (region.usable_bbox or region.bbox)[1],
+            (region.usable_bbox or region.bbox)[0],
             region.rank if region.rank is not None else len(regions) + 1,
         ),
     )
@@ -275,6 +273,10 @@ def _coerce_region(data: RegionFeatures | dict[str, Any]) -> RegionFeatures:
         location=str(data["location"]),
         score=float(data.get("score", 0.0)),
         rank=int(data["rank"]) if data.get("rank") is not None else None,
+        usable_bbox=(
+            tuple(data["usable_bbox"]) if data.get("usable_bbox") is not None else None
+        ),
+        mask_sha256=data.get("mask_sha256"),
     )
 
 
@@ -306,19 +308,31 @@ def _render_text_on_image(
     max_characters_per_line: int | None,
     placement: str | None = None,
     target_rect: tuple[int, int, int, int] | None = None,
+    min_font_scale: float | None = None,
 ) -> tuple[int, tuple[int, int, int, int], str, int]:
-    font_size = max(1, round(min(rendered.size) * font_scale))
+    if not text.strip():
+        raise ValueError("rendered text cannot be blank")
+    margin = max(4, round(min(rendered.size) * 0.05))
+    fit_rect = target_rect or (
+        margin,
+        margin,
+        rendered.width - 2 * margin,
+        rendered.height - 2 * margin,
+    )
+    prepared_text = _wrap_text_by_character_count(text, max_characters_per_line)
+    font_size, (text_width, text_height), rendered_text, line_count, raw_bbox = (
+        _fit_text_to_rect(
+            rendered,
+            prepared_text,
+            font_scale,
+            fit_rect,
+            min_font_scale=min_font_scale,
+            require_fit=True,
+        )
+    )
     font = _load_font(font_size)
     draw = ImageDraw.Draw(rendered)
     line_spacing = max(1, round(font_size * 0.2))
-    rendered_text = _wrap_text_by_character_count(text, max_characters_per_line)
-    line_count = rendered_text.count("\n") + 1
-
-    raw_bbox = draw.multiline_textbbox(
-        (0, 0), rendered_text, font=font, spacing=line_spacing
-    )
-    text_width = raw_bbox[2] - raw_bbox[0]
-    text_height = raw_bbox[3] - raw_bbox[1]
     if target_rect is not None:
         target_x, target_y = _text_position_in_rect(
             target_rect, (text_width, text_height)
@@ -359,53 +373,24 @@ def _measure_multiline_text(
     return bbox[2] - bbox[0], bbox[3] - bbox[1], bbox
 
 
-def _split_word_to_fit_width(
-    word: str,
-    font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
-    max_width: int,
-    draw: ImageDraw.ImageDraw,
-) -> list[str]:
-    chunks: list[str] = []
-    current = ""
-    for character in word:
-        candidate = f"{current}{character}"
-        width = draw.textbbox((0, 0), candidate, font=font)[2]
-        if current and width > max_width:
-            chunks.append(current)
-            current = character
-        else:
-            current = candidate
-    if current:
-        chunks.append(current)
-    return chunks or [word]
-
-
 def _wrap_text_to_pixel_width(
     text: str,
     font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
     max_width: int,
     draw: ImageDraw.ImageDraw,
 ) -> str:
-    lines: list[str] = []
+    lines = []
     for source_line in text.splitlines() or [""]:
-        words = source_line.split()
-        if not words:
-            lines.append("")
-            continue
-
-        current_line = ""
-        for word in words:
-            word_parts = _split_word_to_fit_width(word, font, max_width, draw)
-            for part in word_parts:
-                candidate = part if not current_line else f"{current_line} {part}"
-                candidate_width = draw.textbbox((0, 0), candidate, font=font)[2]
-                if not current_line or candidate_width <= max_width:
-                    current_line = candidate
-                else:
-                    lines.append(current_line)
-                    current_line = part
-        if current_line:
-            lines.append(current_line)
+        current = ""
+        for word in source_line.split():
+            candidate = f"{current} {word}" if current else word
+            bbox = draw.textbbox((0, 0), candidate, font=font)
+            if current and bbox[2] - bbox[0] > max_width:
+                lines.append(current)
+                current = word
+            else:
+                current = candidate
+        lines.append(current)
     return "\n".join(lines)
 
 
@@ -417,19 +402,26 @@ def _fit_text_to_rect(
     min_font_scale: float | None = None,
     require_fit: bool = False,
 ) -> tuple[int, tuple[int, int], str, int, tuple[int, int, int, int]]:
+    if not text.strip():
+        raise ValueError("rendered text cannot be blank")
     draw = ImageDraw.Draw(rendered)
     rect_width, rect_height = rect[2], rect[3]
-    max_font_size = max(1, round(min(rendered.size) * font_scale))
+    if rect_width <= 0 or rect_height <= 0:
+        raise ValueError("rendering region must have positive dimensions")
     min_font_size = (
-        max(1, round(min(rendered.size) * min_font_scale))
+        max(1, ceil(min(rendered.size) * min_font_scale))
         if min_font_scale is not None
         else 1
     )
-    if min_font_size > max_font_size:
+    if min_font_scale is not None and min_font_scale > font_scale:
         raise ValueError("min_font_scale must be less than or equal to font_scale")
 
     best: tuple[int, tuple[int, int], str, int, tuple[int, int, int, int]] | None = None
-    for font_size in range(max_font_size, min_font_size - 1, -1):
+    max_font_size = max(min_font_size, round(min(rendered.size) * font_scale))
+    sizes = [max_font_size]
+    while sizes[-1] > min_font_size:
+        sizes.append(max(min_font_size, min(sizes[-1] - 1, int(sizes[-1] * 0.9))))
+    for font_size in sizes:
         font = _load_font(font_size)
         spacing = max(1, round(font_size * 0.2))
         wrapped_text = _wrap_text_to_pixel_width(text, font, rect_width, draw)
@@ -447,9 +439,7 @@ def _fit_text_to_rect(
         if text_width <= rect_width and text_height <= rect_height:
             return best
 
-    if best is None or require_fit:
-        raise ValueError("unable to fit text into region")
-    return best
+    raise ValueError("unable to fit text into region at the minimum font size")
 
 
 def _render_fitted_text_in_rect(
@@ -527,6 +517,9 @@ def render_text_prompt(
         output_path=str(output_path),
         placement=placement,
         font_size=font_size,
+        requested_font_scale=font_scale,
+        actual_font_scale=font_size / min(rendered.size),
+        font_name=str(_load_font(font_size).getname()),
         text_bbox=tuple(int(value) for value in text_bbox),
         rendered_text=rendered_text,
         line_count=line_count,
@@ -541,6 +534,7 @@ def render_text_prompt_in_top_ranked_mask(
     font_scale: float,
     brightness_offset: int = DEFAULT_BRIGHTNESS_OFFSET,
     max_characters_per_line: int | None = None,
+    min_font_scale: float | None = None,
 ) -> RenderMetadata:
     """Render text centered in the top-ranked mask rectangle using region color."""
     if font_scale <= 0:
@@ -553,7 +547,9 @@ def render_text_prompt_in_top_ranked_mask(
     with Image.open(input_path) as image:
         rendered = image.convert("RGB")
 
-    region_rect = _rect_from_region_bbox(selected_region.bbox, rendered.size)
+    region_rect = _rect_from_region_bbox(
+        selected_region.usable_bbox or selected_region.bbox, rendered.size
+    )
     average_rgb = _average_rgb_for_rect(rendered, region_rect)
     final_rgb = _apply_brightness_offset(average_rgb, brightness_offset)
     font_size, text_bbox, rendered_text, line_count = _render_text_on_image(
@@ -563,6 +559,7 @@ def render_text_prompt_in_top_ranked_mask(
         color=final_rgb,
         max_characters_per_line=max_characters_per_line,
         target_rect=region_rect,
+        min_font_scale=min_font_scale,
     )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -572,6 +569,9 @@ def render_text_prompt_in_top_ranked_mask(
         output_path=str(output_path),
         placement="top_ranked_mask",
         font_size=font_size,
+        requested_font_scale=font_scale,
+        actual_font_scale=font_size / min(rendered.size),
+        font_name=str(_load_font(font_size).getname()),
         text_bbox=text_bbox,
         rendered_text=rendered_text,
         line_count=line_count,
@@ -680,37 +680,80 @@ def render_text_prompt_across_ranked_masks(
     metadata_output_path: str | Path | None = None,
     visualization_output_path: str | Path | None = None,
     write_auxiliary_outputs: bool = True,
+    min_font_scale: float | None = None,
 ) -> RenderMetadata:
     """Split text and render chunks into ranked masks in reading order."""
     if font_scale <= 0:
         raise ValueError("font_scale must be greater than 0")
 
-    ordered_regions = _reading_order_regions(ranked_regions)
+    # Prefer ranked regions, but never overlay chunks in overlapping rectangles.
+    selected_regions = []
+    for region in sorted(
+        [_coerce_region(r) for r in ranked_regions], key=lambda r: r.rank or 0
+    ):
+        rect = region.usable_bbox or region.bbox
+        if any(
+            _rectangles_overlap(rect, r.usable_bbox or r.bbox) for r in selected_regions
+        ):
+            continue
+        selected_regions.append(region)
+    ordered_regions = _reading_order_regions(selected_regions)
     if not ordered_regions:
         raise ValueError("ranked_regions must contain at least one region")
-
-    chunks_text = _split_text_into_chunks(text, len(ordered_regions))
-    selected_regions = ordered_regions[: len(chunks_text)]
+    words = text.split()
+    if not words:
+        raise ValueError("rendered text cannot be blank")
     input_path = Path(input_image_path)
     output_path = Path(output_image_path)
 
     with Image.open(input_path) as image:
         rendered = image.convert("RGB")
 
+    original = rendered.copy()
     chunk_metadata: list[ChunkRenderMetadata] = []
-    for chunk_index, (chunk_text, region) in enumerate(
-        zip(chunks_text, selected_regions)
-    ):
-        region_rect = _rect_from_region_bbox(region.bbox, rendered.size)
-        average_rgb = _average_rgb_for_rect(rendered, region_rect)
+    cursor = 0
+    for region_index, region in enumerate(ordered_regions):
+        if cursor == len(words):
+            break
+        region_rect = _rect_from_region_bbox(
+            region.usable_bbox or region.bbox, rendered.size
+        )
+        average_rgb = _average_rgb_for_rect(original, region_rect)
         final_rgb = _apply_brightness_offset(average_rgb, brightness_offset)
+        remaining_regions = len(ordered_regions) - region_index
+        desired = (len(words) - cursor + remaining_regions - 1) // remaining_regions
+        # The final region must accommodate all remaining words.
+        candidates = (
+            [len(words) - cursor] if remaining_regions == 1 else range(desired, 0, -1)
+        )
+        layout = None
+        for count in candidates:
+            chunk_text = " ".join(words[cursor : cursor + count])
+            try:
+                layout = _fit_text_to_rect(
+                    rendered,
+                    chunk_text,
+                    font_scale,
+                    region_rect,
+                    min_font_scale=min_font_scale,
+                    require_fit=True,
+                )
+                break
+            except ValueError:
+                continue
+        if layout is None:
+            continue
+        cursor += count
         font_size, text_bbox, rendered_chunk, line_count = _render_fitted_text_in_rect(
             rendered=rendered,
             text=chunk_text,
             font_scale=font_scale,
             color=final_rgb,
             rect=region_rect,
+            min_font_scale=min_font_scale,
+            require_fit=True,
         )
+        chunk_index = len(chunk_metadata)
         chunk_metadata.append(
             ChunkRenderMetadata(
                 chunk_index=chunk_index,
@@ -727,6 +770,10 @@ def render_text_prompt_across_ranked_masks(
             )
         )
 
+    if cursor != len(words):
+        raise ValueError(
+            "unable to fit complete prompt across non-overlapping regions at the minimum font size"
+        )
     chunks = tuple(chunk_metadata)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     rendered.save(output_path)
@@ -751,6 +798,9 @@ def render_text_prompt_across_ranked_masks(
         output_path=str(output_path),
         placement="multi_mask",
         font_size=max(chunk.font_size for chunk in chunks),
+        requested_font_scale=font_scale,
+        actual_font_scale=min(chunk.font_size for chunk in chunks) / min(rendered.size),
+        font_name=str(_load_font(chunks[0].font_size).getname()),
         text_bbox=_union_text_bbox(chunks),
         rendered_text=" ".join(chunk.text.replace("\n", " ") for chunk in chunks),
         line_count=sum(chunk.line_count for chunk in chunks),
@@ -787,7 +837,9 @@ def render_text_prompt_adaptive_mask_average(
     with Image.open(input_path) as image:
         rendered = image.convert("RGB")
 
-    region_rect = _rect_from_region_bbox(selected_region.bbox, rendered.size)
+    region_rect = _rect_from_region_bbox(
+        selected_region.usable_bbox or selected_region.bbox, rendered.size
+    )
     average_rgb = _average_rgb_for_rect(rendered, region_rect)
     final_rgb = _apply_brightness_offset(average_rgb, brightness_offset)
 
@@ -810,24 +862,9 @@ def render_text_prompt_adaptive_mask_average(
             font_scale=font_scale,
             brightness_offset=brightness_offset,
             write_auxiliary_outputs=write_auxiliary_outputs,
+            min_font_scale=min_font_scale,
         )
-        return RenderMetadata(
-            output_path=metadata.output_path,
-            placement=metadata.placement,
-            font_size=metadata.font_size,
-            text_bbox=metadata.text_bbox,
-            rendered_text=metadata.rendered_text,
-            line_count=metadata.line_count,
-            selected_mask_id=metadata.selected_mask_id,
-            average_rgb=metadata.average_rgb,
-            brightness_offset=metadata.brightness_offset,
-            final_rgb=metadata.final_rgb,
-            region_bbox=metadata.region_bbox,
-            chunks=metadata.chunks,
-            chunk_metadata_path=metadata.chunk_metadata_path,
-            visualization_path=metadata.visualization_path,
-            adaptive_fallback_used=True,
-        )
+        return replace(metadata, adaptive_fallback_used=True)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     rendered.save(output_path)
@@ -836,6 +873,9 @@ def render_text_prompt_adaptive_mask_average(
         output_path=str(output_path),
         placement="top_ranked_mask",
         font_size=font_size,
+        requested_font_scale=font_scale,
+        actual_font_scale=font_size / min(rendered.size),
+        font_name=str(_load_font(font_size).getname()),
         text_bbox=text_bbox,
         rendered_text=rendered_text,
         line_count=line_count,

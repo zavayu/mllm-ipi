@@ -43,7 +43,9 @@ def _generate_sam_masks(
 
     if model_type not in sam_model_registry:
         supported = ", ".join(sorted(sam_model_registry))
-        raise ValueError(f"unsupported SAM model type '{model_type}'; choose: {supported}")
+        raise ValueError(
+            f"unsupported SAM model type '{model_type}'; choose: {supported}"
+        )
 
     sam = sam_model_registry[model_type](checkpoint=str(checkpoint))
     generator = SamAutomaticMaskGenerator(
@@ -105,14 +107,18 @@ def generate_candidate_masks(
     return _grid_fallback_masks(image)
 
 
-def resolve_segmentation(backend: str = "auto", checkpoint: str | Path | None = None) -> tuple[str, Path | None]:
+def resolve_segmentation(
+    backend: str = "auto", checkpoint: str | Path | None = None
+) -> tuple[str, Path | None]:
     if backend not in {"auto", "sam", "grid"}:
         raise ValueError("mask backend must be auto, sam, or grid")
     if backend == "grid":
         return "grid", None
     checkpoint = checkpoint or os.getenv("SAM_CHECKPOINT")
     if backend == "sam" and not checkpoint:
-        raise ValueError("SAM backend requires a checkpoint; grid fallback is not allowed")
+        raise ValueError(
+            "SAM backend requires a checkpoint; grid fallback is not allowed"
+        )
     return ("sam", Path(checkpoint)) if checkpoint else ("grid", None)
 
 
@@ -168,7 +174,9 @@ def save_ranked_mask_visualization(
 
         x, y, width, height = region.bbox
         draw = ImageDraw.Draw(overlay)
-        draw.rectangle((x, y, x + width - 1, y + height - 1), outline=(*color, 255), width=3)
+        draw.rectangle(
+            (x, y, x + width - 1, y + height - 1), outline=(*color, 255), width=3
+        )
         _draw_rank_label(draw, (x + 4, y + 4), f"#{region.rank}", color)
 
     visualized = Image.alpha_composite(base, overlay).convert("RGB")
@@ -205,6 +213,9 @@ def generate_and_rank_masks(
     metadata_path.write_text(
         json.dumps([region.to_dict() for region in ranked_regions], indent=2),
         encoding="utf-8",
+    )
+    np.savez_compressed(
+        output_dir / "masks.npz", **{f"mask_{i}": mask for i, mask in enumerate(masks)}
     )
     save_ranked_mask_visualization(image, masks, ranked_regions, visualization_path)
     return ranked_regions

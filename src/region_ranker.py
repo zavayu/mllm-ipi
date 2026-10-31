@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
+from hashlib import sha256
 from typing import Iterable
 
 import numpy as np
@@ -23,6 +24,8 @@ class RegionFeatures:
     location: str
     score: float = 0.0
     rank: int | None = None
+    usable_bbox: tuple[int, int, int, int] | None = None
+    mask_sha256: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         """Return JSON-serializable region metadata."""
@@ -67,6 +70,40 @@ def classify_location(
     return f"{vertical}_{horizontal}"
 
 
+def largest_interior_rectangle(mask: np.ndarray) -> tuple[int, int, int, int]:
+    """Largest all-true axis-aligned rectangle, using a row histogram in O(HW)."""
+    mask = np.asarray(mask, dtype=bool)
+    if mask.ndim != 2 or not mask.any():
+        raise ValueError("mask must be a nonempty 2D region")
+    ys, xs = np.nonzero(mask)
+    x0, y0, x1, y1 = int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
+    cropped = mask[y0:y1, x0:x1]
+    if cropped.all():
+        return (x0, y0, x1 - x0, y1 - y0)
+    heights = np.zeros(cropped.shape[1], dtype=int)
+    best_area, best = 0, None
+    for y, row in enumerate(cropped):
+        heights = np.where(row, heights + 1, 0)
+        stack = []
+        for x in range(len(heights) + 1):
+            height = int(heights[x]) if x < len(heights) else 0
+            start = x
+            while stack and stack[-1][1] > height:
+                start, previous_height = stack.pop()
+                area = previous_height * (x - start)
+                if area > best_area:
+                    best_area = area
+                    best = (
+                        x0 + start,
+                        y0 + y - previous_height + 1,
+                        x - start,
+                        previous_height,
+                    )
+            if not stack or stack[-1][1] < height:
+                stack.append((start, height))
+    return best
+
+
 def compute_region_features(
     image: np.ndarray,
     mask: np.ndarray,
@@ -98,6 +135,8 @@ def compute_region_features(
         rgb_variance=rgb_variance,
         center=center,
         location=classify_location(center, image.shape),
+        usable_bbox=largest_interior_rectangle(boolean_mask),
+        mask_sha256=sha256(boolean_mask.tobytes()).hexdigest(),
     )
 
 
@@ -126,15 +165,8 @@ def rank_regions(
     max_variance = max(region.rgb_variance for region in region_list)
 
     scored = [
-        RegionFeatures(
-            mask_id=region.mask_id,
-            area=region.area,
-            bbox=region.bbox,
-            average_rgb=region.average_rgb,
-            rgb_variance=region.rgb_variance,
-            center=region.center,
-            location=region.location,
-            score=_score_region(region, max_area, max_variance, location_bonus),
+        replace(
+            region, score=_score_region(region, max_area, max_variance, location_bonus)
         )
         for region in region_list
     ]
@@ -148,20 +180,7 @@ def rank_regions(
         reverse=True,
     )
 
-    return [
-        RegionFeatures(
-            mask_id=region.mask_id,
-            area=region.area,
-            bbox=region.bbox,
-            average_rgb=region.average_rgb,
-            rgb_variance=region.rgb_variance,
-            center=region.center,
-            location=region.location,
-            score=region.score,
-            rank=index + 1,
-        )
-        for index, region in enumerate(scored)
-    ]
+    return [replace(region, rank=index + 1) for index, region in enumerate(scored)]
 
 
 def compute_and_rank_regions(

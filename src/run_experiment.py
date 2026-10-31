@@ -201,11 +201,15 @@ def _render_configuration(
         )
     if strategy == MULTI_MASK_COLOR_STRATEGY:
         return render_text_prompt_across_ranked_masks(
-            **common, write_auxiliary_outputs=False
+            **common,
+            write_auxiliary_outputs=False,
+            min_font_scale=config.rendering.min_font_scale,
         )
     if strategy == MASK_COLOR_STRATEGY:
         return render_text_prompt_in_top_ranked_mask(
-            **common, max_characters_per_line=config.rendering.max_characters_per_line
+            **common,
+            max_characters_per_line=config.rendering.max_characters_per_line,
+            min_font_scale=config.rendering.min_font_scale,
         )
     return render_text_prompt(
         **common,
@@ -438,6 +442,8 @@ def run_experiment(
                         start = perf_counter()
                         try:
                             response = model_client.query(str(output_path), instruction)
+                            if isinstance(model_client, QwenVisionModelClient):
+                                row["model_input"] = model_client.last_input_metadata
                             outcomes = response_metrics(config.target.phrase, response)
                             row.update(
                                 status="completed",

@@ -122,13 +122,18 @@ class ExperimentConfig:
             raise ValueError("paper_image_only requires an empty model.instruction")
         if condition == "task_override" and not (self.model.instruction or "").strip():
             raise ValueError("task_override requires a nonblank model.instruction")
-        if self.evaluation.repetitions < 1 or (self.evaluation.repetitions > 1 and not self.model.do_sample):
+        if self.evaluation.repetitions < 1 or (
+            self.evaluation.repetitions > 1 and not self.model.do_sample
+        ):
             raise ValueError("repetitions > 1 requires model.do_sample=true")
         if self.model.seed < 0:
             raise ValueError("model.seed must be nonnegative")
         if self.model.type not in {"mock", "qwen"}:
             raise ValueError("model.type must be mock or qwen")
-        if self.evaluation.task_expected_response is not None and not self.evaluation.task_expected_response.strip():
+        if (
+            self.evaluation.task_expected_response is not None
+            and not self.evaluation.task_expected_response.strip()
+        ):
             raise ValueError("task_expected_response cannot be blank")
 
 

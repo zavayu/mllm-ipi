@@ -128,9 +128,14 @@ def test_sampling_parameters_and_seed_are_explicit(monkeypatch):
     calls = []
     seeds = []
     client = QwenVisionModelClient(do_sample=True, temperature=0.7, top_p=0.9, seed=12)
-    client._torch = SimpleNamespace(manual_seed=seeds.append, inference_mode=nullcontext,
-                                   cuda=SimpleNamespace(is_available=lambda: False))
-    client._model = SimpleNamespace(generate=lambda **kw: calls.append(kw) or [[1, 2, 3, 4, 5]])
+    client._torch = SimpleNamespace(
+        manual_seed=seeds.append,
+        inference_mode=nullcontext,
+        cuda=SimpleNamespace(is_available=lambda: False),
+    )
+    client._model = SimpleNamespace(
+        generate=lambda **kw: calls.append(kw) or [[1, 2, 3, 4, 5]]
+    )
     client._processor = FakeProcessor()
     client._generate_and_decode(FakeInputs())
     assert seeds == [12]
