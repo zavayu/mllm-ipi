@@ -39,6 +39,8 @@ def _write_results(path):
             "color_strategy": "white",
         },
     ]
+    for row in rows:
+        row["exact_target_response"] = row["success"]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "\n".join(json.dumps(row) for row in rows) + "\n",
@@ -75,6 +77,7 @@ def test_compute_summary_includes_overall_and_grouped_asr(tmp_path):
 
     assert by_key[("overall", "all")] == {
         "group": "overall",
+        "metric": "exact_target_response",
         "value": "all",
         "total": 4,
         "successes": 3,
@@ -104,6 +107,7 @@ def test_evaluate_results_creates_summary_csv_and_plot(tmp_path):
 
     assert rows[0] == {
         "group": "overall",
+        "metric": "exact_target_response",
         "value": "all",
         "total": "4",
         "successes": "3",
@@ -137,3 +141,22 @@ def test_evaluate_cli_creates_artifacts(tmp_path):
     assert "summary_csv=" in result.stdout
     assert (out_dir / "summary.csv").exists()
     assert (out_dir / "asr_by_font_scale.png").exists()
+
+
+def test_legacy_logs_require_explicit_metric():
+    with pytest.raises(ValueError, match="legacy logs"):
+        compute_summary([{"success": True}])
+    assert compute_summary([{"success": True}], metric="success")[0]["asr"] == 1
+
+
+def test_failures_do_not_count_as_completed_trials():
+    summary = compute_summary([
+        {"exact_target_response": True, "status": "completed"},
+        {"status": "error", "error": "query failed"},
+    ])
+    assert summary[0]["total"] == 1
+
+
+def test_default_summary_does_not_count_mentions_as_exact():
+    rows = [{"target_containment": True, "exact_target_response": False}]
+    assert compute_summary(rows)[0]["asr"] == 0

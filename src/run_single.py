@@ -18,6 +18,7 @@ from src.render_prompt import (
     render_text_prompt_in_top_ranked_mask,
 )
 from src.segment_regions import generate_candidate_masks
+from src.response_metrics import response_metrics
 
 DEFAULT_FONT_SCALE = 0.16
 DEFAULT_PLACEMENT = "center"
@@ -39,7 +40,7 @@ def _load_image(input_image_path: str | Path) -> None:
 
 def target_in_response(target: str, response: str) -> bool:
     """Return whether the model response contains the target phrase."""
-    return target.casefold() in response.casefold()
+    return response_metrics(target, response)["target_containment"]
 
 
 def run_single_image(
@@ -54,12 +55,17 @@ def run_single_image(
     placement: str = DEFAULT_PLACEMENT,
     color_strategy: str = DEFAULT_COLOR_STRATEGY,
     brightness_offset: int = DEFAULT_BRIGHTNESS_OFFSET,
+    embedded_prompt: str | None = None,
 ) -> dict[str, object]:
     """Render target text, query the mock model, and persist one JSONL result."""
     if placement not in SUPPORTED_PLACEMENTS:
         supported = ", ".join(sorted(SUPPORTED_PLACEMENTS))
         raise ValueError(f"placement must be one of: {supported}")
 
+    prompt = target if embedded_prompt is None else embedded_prompt
+    if not prompt.strip():
+        raise ValueError("embedded_prompt cannot be blank")
+    response_metrics(target, "")
     input_path = Path(input_image_path)
     _load_image(input_path)
 
@@ -72,7 +78,7 @@ def run_single_image(
         render_metadata = render_text_prompt_in_top_ranked_mask(
             input_image_path=input_path,
             output_image_path=generated_path,
-            text=target,
+            text=prompt,
             ranked_regions=ranked_regions,
             font_scale=font_scale,
             brightness_offset=brightness_offset,
@@ -81,7 +87,7 @@ def run_single_image(
         render_metadata = render_text_prompt(
             input_image_path=input_path,
             output_image_path=generated_path,
-            text=target,
+            text=prompt,
             placement=placement,
             font_scale=font_scale,
             color=DEFAULT_COLOR,
@@ -93,6 +99,10 @@ def run_single_image(
 
     row: dict[str, object] = {
         "success": success,
+        "schema_version": 2,
+        **response_metrics(target, model_response),
+        "expected_response": target,
+        "embedded_prompt": prompt,
         "original_image": str(input_path),
         "generated_image": str(generated_path),
         "target": target,
@@ -125,6 +135,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--target", required=True, help="Target phrase to render and detect."
     )
+    parser.add_argument("--embedded-prompt", help="Text to render; defaults to --target.")
+    parser.add_argument("--instruction", default=DEFAULT_INSTRUCTION_TEMPLATE)
     parser.add_argument(
         "--out-dir", required=True, help="Directory for the generated image."
     )
@@ -159,6 +171,8 @@ def main(argv: list[str] | None = None) -> int:
         results_path=args.results,
         color_strategy=args.color_strategy,
         brightness_offset=args.brightness_offset,
+        embedded_prompt=args.embedded_prompt,
+        instruction=args.instruction,
     )
     print(f"generated_image={row['generated_image']}")
     print(f"results={args.results}")

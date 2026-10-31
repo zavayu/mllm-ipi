@@ -36,6 +36,8 @@ def test_run_single_image_creates_generated_image_and_jsonl(tmp_path):
     assert row["instruction"]
     assert row["model_response"] == "The target phrase is BANANA."
     assert row["success"] is True
+    assert row["target_containment"] is True
+    assert row["exact_target_response"] is False
     assert row["font_scale"] == 0.16
     assert row["placement"] == "center"
     assert row["color_strategy"] == "red"

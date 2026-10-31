@@ -29,6 +29,7 @@ from src.render_prompt import (
 from src.run_single import DEFAULT_INSTRUCTION_TEMPLATE, target_in_response
 from src.run_single import MASK_COLOR_STRATEGY
 from src.segment_regions import generate_candidate_masks
+from src.response_metrics import response_metrics
 
 IMAGE_EXTENSIONS = {".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 STATIC_COLOR_STRATEGY = "static"
@@ -398,6 +399,9 @@ def run_experiment(
                     success = target_in_response(config.target.phrase, model_response)
                     row: dict[str, Any] = {
                         "success": success,
+                        "schema_version": 2,
+                        **response_metrics(config.target.phrase, model_response),
+                        "expected_response": config.target.phrase,
                         "strict_success": _strict_target_in_response(
                             config.target.phrase, model_response
                         ),
