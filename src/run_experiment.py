@@ -7,7 +7,7 @@ import json
 from dataclasses import asdict
 from time import perf_counter
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 from PIL import Image
@@ -233,7 +233,10 @@ def _render_configuration(
 
 
 def run_experiment(
-    config: ExperimentConfig, *, client: VisionModelClient | None = None
+    config: ExperimentConfig,
+    *,
+    client: VisionModelClient | None = None,
+    on_result: Callable[[dict[str, Any]], None] | None = None,
 ) -> list[dict[str, Any]]:
     """Append completed trials and retryable errors with content-addressed identity."""
     image_paths = iter_dataset_images(
@@ -280,6 +283,8 @@ def run_experiment(
     def append(row):
         append_jsonl_row(config.output.results_path, row)
         rows.append(row)
+        if on_result is not None:
+            on_result(row)
         if row["status"] == "completed":
             completed.add(row["run_id"])
 

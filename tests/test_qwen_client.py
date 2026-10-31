@@ -115,6 +115,20 @@ def test_qwen_client_satisfies_vision_model_client_protocol():
     assert isinstance(client, VisionModelClient)
 
 
+@pytest.mark.parametrize("eos,limited", [(None, True), (5, False)])
+def test_generation_budget_distinguishes_eos_from_length(eos, limited):
+    client = QwenVisionModelClient(max_new_tokens=2)
+    client._torch = fake_torch(False)
+    client._processor = FakeProcessor()
+    client._model = SimpleNamespace(
+        generate=lambda **kw: [[1, 2, 3, 4, 5]],
+        generation_config=SimpleNamespace(eos_token_id=eos),
+    )
+    client._generate_and_decode(FakeInputs())
+    assert client.last_generation_metadata["output_tokens"] == 2
+    assert client.last_generation_metadata["hit_token_limit"] is limited
+
+
 def test_qwen_client_is_lazy_until_query(monkeypatch):
     def fail_if_loaded():
         raise AssertionError("torch should not be imported during construction")

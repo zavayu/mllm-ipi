@@ -279,6 +279,11 @@ class QwenVisionModelClient:
             ),
             "resolved_family": self._resolved_model_family,
             "actual_dtype": str(getattr(self._model, "dtype", "unknown")),
+            "torch_threads": (
+                self._torch.get_num_threads()
+                if hasattr(self._torch, "get_num_threads")
+                else None
+            ),
             "device_map": getattr(self._model, "hf_device_map", None),
             "processor": (
                 image_processor.to_dict() if image_processor is not None else {}
