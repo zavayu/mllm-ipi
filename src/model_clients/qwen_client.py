@@ -247,6 +247,16 @@ class QwenVisionModelClient:
         image_processor = getattr(self._processor, "image_processor", None)
         generation_config = getattr(self._model, "generation_config", None)
         return {
+            "model_id": self.model_id,
+            "requested_revision": self.revision,
+            "inference_options": {
+                "max_new_tokens": self.max_new_tokens,
+                "do_sample": self.do_sample,
+                "temperature": self.temperature,
+                "top_p": self.top_p,
+                "min_pixels": self.min_pixels,
+                "max_pixels": self.max_pixels,
+            },
             "resolved_revision": getattr(
                 getattr(self._model, "config", None), "_commit_hash", None
             ),

@@ -27,6 +27,12 @@ def fingerprint(value: object) -> str:
     ).hexdigest()
 
 
+def write_json_atomic(path: Path, payload: object) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
 def build_manifest(
     config: ExperimentConfig, images: list[Path], client: object
 ) -> dict:
@@ -110,5 +116,5 @@ def write_manifest(results_path: Path, manifest: dict) -> tuple[str, Path]:
         if json.loads(path.read_text(encoding="utf-8")) != payload:
             raise ValueError(f"manifest contents do not match identity: {path}")
     else:
-        path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        write_json_atomic(path, payload)
     return experiment_id, path

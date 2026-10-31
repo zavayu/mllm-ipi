@@ -162,3 +162,13 @@ def test_failures_do_not_count_as_completed_trials():
 def test_default_summary_does_not_count_mentions_as_exact():
     rows = [{"target_containment": True, "exact_target_response": False}]
     assert compute_summary(rows)[0]["asr"] == 0
+
+
+def test_different_experiments_cannot_be_pooled_accidentally():
+    with pytest.raises(ValueError, match="multiple experiments"):
+        compute_summary(
+            [
+                {"experiment_id": "a", "exact_target_response": True},
+                {"experiment_id": "b", "exact_target_response": False},
+            ]
+        )

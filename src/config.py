@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from math import isfinite
 from pathlib import Path
 from typing import Any
 
@@ -215,7 +216,11 @@ def _float_sequence(data: dict[str, Any], key: str) -> tuple[float, ...]:
 
 def _float(data: dict[str, Any], key: str, default: float) -> float:
     value = data.get(key, default)
-    if not isinstance(value, int | float):
+    if (
+        not isinstance(value, int | float)
+        or isinstance(value, bool)
+        or not isfinite(value)
+    ):
         raise ValueError(f"config value {key!r} must be a number")
     return float(value)
 

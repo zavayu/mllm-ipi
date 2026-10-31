@@ -3,14 +3,18 @@ import pytest
 from src.config import ExperimentConfig, load_config
 
 
-@pytest.mark.parametrize("extra,match", [
-    ("evaluation:\n  condition: invalid", "condition"),
-    ("evaluation:\n  condition: task_override", "nonblank"),
-    ("evaluation:\n  repetitions: 5", "do_sample"),
-])
+@pytest.mark.parametrize(
+    "extra,match",
+    [
+        ("evaluation:\n  condition: invalid", "condition"),
+        ("evaluation:\n  condition: task_override", "nonblank"),
+        ("evaluation:\n  repetitions: 5", "do_sample"),
+    ],
+)
 def test_evaluation_contract_rejects_invalid_conditions(tmp_path, extra, match):
     path = tmp_path / "invalid.yaml"
-    path.write_text("""dataset:
+    path.write_text(
+        """dataset:
   image_dir: images
 target:
   phrase: BANANA
@@ -23,7 +27,9 @@ model:
 output:
   generated_dir: generated
   results_path: results.jsonl
-""" + extra, encoding="utf-8")
+""" + extra,
+        encoding="utf-8",
+    )
     with pytest.raises(ValueError, match=match):
         load_config(path)
 

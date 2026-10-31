@@ -13,7 +13,7 @@ from src.config import (
     ExperimentConfig,
     EvaluationConfig,
 )
-from src.run_experiment import run_experiment
+from src.run_experiment import run_experiment, load_completed_run_ids
 
 
 class Client:
@@ -125,3 +125,29 @@ def test_empty_dataset_is_not_a_successful_experiment(config):
     (config.dataset.image_dir / "one.png").unlink()
     with pytest.raises(ValueError, match="no dataset images"):
         run_experiment(config, client=Client())
+
+
+def test_interrupted_last_line_is_preserved_and_retried(config):
+    (first,) = run_experiment(config, client=Client())
+    with config.output.results_path.open("ab") as handle:
+        handle.write(b'{"run_id": "unfinished')
+    assert run_experiment(config, client=Client()) == []
+    assert load_completed_run_ids(config.output.results_path) == {first["run_id"]}
+    backups = list(config.output.results_path.parent.glob("*.incomplete-*"))
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == b'{"run_id": "unfinished'
+
+
+def test_malformed_middle_record_is_not_silently_repaired(config):
+    config.output.results_path.write_text("{bad}\n{}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="line 1"):
+        load_completed_run_ids(config.output.results_path)
+
+
+def test_valid_record_without_newline_can_be_appended(config):
+    config.output.results_path.write_text('{"run_id": "previous"}', encoding="utf-8")
+    run_experiment(config, client=Client())
+    rows = [
+        json.loads(line) for line in config.output.results_path.read_text().splitlines()
+    ]
+    assert len(rows) == 2

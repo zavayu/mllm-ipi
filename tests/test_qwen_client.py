@@ -172,6 +172,36 @@ def test_qwen_client_query_loads_model_once_and_decodes(monkeypatch, tmp_path):
     assert client._resolved_model_family == QWEN25_VL_FAMILY
 
 
+def test_processor_is_pinned_to_actual_weight_revision(monkeypatch, tmp_path):
+    image = tmp_path / "image.png"
+    image.write_bytes(b"processor is mocked")
+    revisions = []
+
+    class Processor(FakeProcessor):
+        @classmethod
+        def from_pretrained(cls, model_id, **kwargs):
+            revisions.append(kwargs["revision"])
+            return cls()
+
+    class Model(FakeModel):
+        @classmethod
+        def from_pretrained(cls, model_id, **kwargs):
+            model = cls()
+            model.config = SimpleNamespace(_commit_hash="resolved-weights")
+            return model
+
+    monkeypatch.setattr(qwen_client, "_import_torch", lambda: fake_torch(True))
+    monkeypatch.setattr(
+        qwen_client,
+        "_import_qwen_libraries",
+        lambda: (Processor, Model, fake_process_vision_info),
+    )
+    client = QwenVisionModelClient(max_new_tokens=7)
+    client.query(str(image), "Describe this image.")
+    assert revisions == ["main", "resolved-weights"]
+    assert client.provenance()["resolved_revision"] == "resolved-weights"
+
+
 def test_qwen_client_auto_detects_qwen3_and_decodes(monkeypatch, tmp_path):
     image = tmp_path / "example.png"
     image.write_bytes(b"not a real png; tests mock image processing")

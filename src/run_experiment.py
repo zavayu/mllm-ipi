@@ -29,7 +29,13 @@ from src.render_prompt import (
 from src.run_single import MASK_COLOR_STRATEGY
 from src.segment_regions import generate_candidate_masks
 from src.response_metrics import response_metrics
-from src.provenance import build_manifest, write_manifest, fingerprint, file_hash
+from src.provenance import (
+    build_manifest,
+    write_manifest,
+    fingerprint,
+    file_hash,
+    write_json_atomic,
+)
 from src.metrics import compute_image_metrics
 
 IMAGE_EXTENSIONS = {".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
@@ -68,23 +74,33 @@ def load_completed_run_ids(results_path: str | Path) -> set[str]:
         return set()
 
     completed: set[str] = set()
-    with path.open("r", encoding="utf-8") as handle:
-        for line_number, line in enumerate(handle, start=1):
-            if not line.strip():
-                continue
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise ValueError(
-                    f"invalid JSONL in {path} at line {line_number}"
-                ) from exc
-            run_id = row.get("run_id")
-            if (
-                isinstance(run_id, str)
-                and run_id
-                and row.get("status", "completed") == "completed"
-            ):
-                completed.add(run_id)
+    lines = path.read_bytes().splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            if index == len(lines) - 1 and not line.endswith(b"\n"):
+                backup = path.with_name(
+                    path.name + ".incomplete-" + fingerprint(line.hex())[:12]
+                )
+                backup.write_bytes(line)
+                path.write_bytes(b"".join(lines[:index]))
+                break
+            raise ValueError(f"invalid JSONL in {path} at line {index + 1}") from exc
+        if not isinstance(row, dict):
+            raise ValueError(f"result row at line {index + 1} must be an object")
+        run_id = row.get("run_id")
+        if (
+            isinstance(run_id, str)
+            and run_id
+            and row.get("status", "completed") == "completed"
+        ):
+            completed.add(run_id)
+    if path.stat().st_size and not path.read_bytes().endswith(b"\n"):
+        with path.open("ab") as handle:
+            handle.write(b"\n")
     return completed
 
 
@@ -99,10 +115,6 @@ def append_jsonl_row(path: str | Path, row: dict[str, Any]) -> None:
 
 def _truncate_words(text: str, word_limit: int = OBJECT_WORD_LIMIT) -> str:
     return " ".join(text.split()[:word_limit])
-
-
-def _strict_target_in_response(target: str, response: str) -> bool:
-    return target in response
 
 
 def _ranked_regions_for_image(
@@ -293,11 +305,8 @@ def run_experiment(
                     config, image_path, model_client, object_cache
                 )
                 if config.target.adaptive_prefix.enabled:
-                    object_path.write_text(
-                        json.dumps(
-                            {str(k): v for k, v in object_cache.items()}, indent=2
-                        ),
-                        encoding="utf-8",
+                    write_json_atomic(
+                        object_path, {str(k): v for k, v in object_cache.items()}
                     )
         except Exception as exc:
             append(
