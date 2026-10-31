@@ -207,6 +207,21 @@ trials, set `model.do_sample: true`, `model.seed`, and `evaluation.repetitions`.
 Paper-style runs require an empty external instruction. Existing result files are
 preserved; legacy summaries require `--metric success` explicitly.
 
+## Milestone 2 benchmark
+
+Prepare the fixed COCO subset, then run the paired development baselines:
+
+```powershell
+python -m src.benchmark_data coco
+python -m src.run_baselines --pilot 3
+python -m src.run_baselines
+```
+
+Add `--allow-cpu` to baseline commands when GPU inference is unavailable. Dataset
+preparation needs network access. See [benchmark instructions](benchmarks/README.md)
+and [actual milestone status](docs/milestone2.md): the local runtime pilot has run,
+but COCO acquisition and its baseline are still pending in this environment.
+
 ## Tests
 
 From the repository root:

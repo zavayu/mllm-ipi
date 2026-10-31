@@ -14,4 +14,7 @@
    document success, visual changes, runtime, query cost, and failure cases.
 
 Milestone 1 implementation and evidence are documented in [milestone1.md](milestone1.md).
-Subsequent milestones are not implemented by this milestone.
+
+Milestone 2 infrastructure and an actual local runtime pilot are implemented.
+The COCO acquisition and development baseline are still blocked; see
+[milestone2.md](milestone2.md) before treating that milestone as complete.
