@@ -65,6 +65,15 @@ def build_manifest(
         commit = None
     settings = asdict(config)
     settings.pop("output")  # Moving output files must not change scientific identity.
+    dataset_manifest = None
+    if config.dataset.manifest is not None:
+        dataset_manifest = {
+            "sha256": file_hash(config.dataset.manifest),
+            "manifest_id": json.loads(
+                config.dataset.manifest.read_text(encoding="utf-8")
+            )["manifest_id"],
+            "split": config.dataset.split,
+        }
     model_provenance = client.provenance() if hasattr(client, "provenance") else {}
     mask_strategy = (
         config.rendering.color_strategy != "static"
@@ -80,9 +89,12 @@ def build_manifest(
     manifest = {
         "schema_version": 2,
         "settings": settings,
+        "dataset_manifest": dataset_manifest,
         "images": [
             {
-                "path": path.relative_to(config.dataset.image_dir).as_posix(),
+                "path": path.resolve()
+                .relative_to(config.dataset.image_dir.resolve())
+                .as_posix(),
                 "sha256": file_hash(path),
             }
             for path in images

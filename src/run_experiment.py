@@ -37,6 +37,7 @@ from src.provenance import (
     write_json_atomic,
 )
 from src.metrics import compute_image_metrics
+from src.benchmark_data import load_manifest
 
 IMAGE_EXTENSIONS = {".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 STATIC_COLOR_STRATEGY = "static"
@@ -238,6 +239,19 @@ def run_experiment(
     image_paths = iter_dataset_images(
         config.dataset.image_dir, config.dataset.max_images
     )
+    if config.dataset.manifest is not None:
+        dataset_manifest, image_paths = load_manifest(
+            config.dataset.manifest, config.dataset.split
+        )
+        expected_root = (
+            config.dataset.manifest.parent / dataset_manifest["image_root"]
+        ).resolve()
+        if expected_root != config.dataset.image_dir.resolve():
+            raise ValueError(
+                "dataset.image_dir does not match the frozen manifest root"
+            )
+        if config.dataset.max_images is not None:
+            image_paths = image_paths[: config.dataset.max_images]
     if not image_paths:
         raise ValueError(f"no dataset images found in {config.dataset.image_dir}")
     model_client = _client_from_config(config, client)
@@ -271,7 +285,11 @@ def run_experiment(
 
     for image_path in image_paths:
         image_hash = file_hash(image_path)
-        image_key = image_path.relative_to(config.dataset.image_dir).as_posix()
+        image_key = (
+            image_path.resolve()
+            .relative_to(config.dataset.image_dir.resolve())
+            .as_posix()
+        )
         base = {
             "schema_version": 2,
             "experiment_id": experiment_id,
@@ -453,6 +471,9 @@ def run_experiment(
                             response = model_client.query(str(output_path), instruction)
                             if isinstance(model_client, QwenVisionModelClient):
                                 row["model_input"] = model_client.last_input_metadata
+                                row["generation"] = (
+                                    model_client.last_generation_metadata
+                                )
                             outcomes = response_metrics(config.target.phrase, response)
                             row.update(
                                 status="completed",

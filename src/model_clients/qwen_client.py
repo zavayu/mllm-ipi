@@ -102,6 +102,7 @@ class QwenVisionModelClient:
     _torch: Any = field(default=None, init=False, repr=False)
     _resolved_model_family: str | None = field(default=None, init=False, repr=False)
     last_input_metadata: dict[str, Any] = field(default_factory=dict, init=False)
+    last_generation_metadata: dict[str, Any] = field(default_factory=dict, init=False)
 
     def query(self, image_path: str, instruction: str) -> str:
         """Return the Qwen VL response for an image and instruction."""
@@ -166,6 +167,20 @@ class QwenVisionModelClient:
             output_ids[len(input_ids) :]
             for input_ids, output_ids in zip(inputs.input_ids, generated_ids)
         ]
+        tokens = generated_ids_trimmed[0]
+        tokens = tokens.tolist() if hasattr(tokens, "tolist") else list(tokens)
+        eos = getattr(
+            getattr(self._model, "generation_config", None), "eos_token_id", None
+        )
+        eos = [eos] if isinstance(eos, int) else (eos or [])
+        ended = bool(tokens and tokens[-1] in eos)
+        limited = len(tokens) >= self.max_new_tokens and not ended
+        self.last_generation_metadata = {
+            "output_tokens": len(tokens),
+            "eos_reached": ended,
+            "hit_token_limit": limited,
+            "finish_reason": "length" if limited else "stop",
+        }
         responses = self._processor.batch_decode(
             generated_ids_trimmed,
             skip_special_tokens=True,

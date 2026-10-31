@@ -16,6 +16,8 @@ from src.render_prompt import DEFAULT_BRIGHTNESS_OFFSET, SUPPORTED_PLACEMENTS
 class DatasetConfig:
     image_dir: Path
     max_images: int | None = None
+    manifest: Path | None = None
+    split: str | None = None
 
 
 @dataclass(frozen=True)
@@ -116,6 +118,16 @@ class ExperimentConfig:
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
 
     def __post_init__(self) -> None:
+        if (self.dataset.manifest is None) != (self.dataset.split is None):
+            raise ValueError(
+                "dataset.manifest and dataset.split must be provided together"
+            )
+        if self.dataset.split is not None and self.dataset.split not in {
+            "development",
+            "validation",
+            "test",
+        }:
+            raise ValueError("unknown dataset split")
         condition = self.evaluation.condition
         if condition not in {"clean", "paper_image_only", "task_override"}:
             raise ValueError("unknown evaluation condition")
@@ -322,6 +334,12 @@ def load_config(path: str | Path) -> ExperimentConfig:
         dataset=DatasetConfig(
             image_dir=Path(_required_string(dataset, "image_dir")),
             max_images=_optional_positive_int(dataset, "max_images"),
+            manifest=(
+                Path(value)
+                if (value := _optional_string(dataset, "manifest"))
+                else None
+            ),
+            split=_optional_string(dataset, "split"),
         ),
         target=TargetConfig(
             phrase=_required_string(target, "phrase"),

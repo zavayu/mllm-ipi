@@ -4,6 +4,7 @@ __pycache__/
 .env
 data/raw/
 data/generated/
+data/benchmark/
 results/
 models/
 .cache/
