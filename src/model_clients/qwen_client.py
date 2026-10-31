@@ -210,6 +210,8 @@ class QwenVisionModelClient:
                     self.model_id, revision=resolved, **self._processor_options()
                 )
         except Exception as exc:
+            self._model = None
+            self._processor = None
             raise RuntimeError(
                 f"failed to load {self._resolved_model_family} model "
                 f"'{self.model_id}'. Ensure the model id is valid, Hugging Face "

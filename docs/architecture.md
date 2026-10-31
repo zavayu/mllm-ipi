@@ -1,22 +1,23 @@
 # Architecture
 
-## Pipeline
+The batch runner is the canonical research path:
 
-1. Load raw image
-2. Render embedded prompt into image
-3. Query local vision-language model
-4. Log model response
-5. Evaluate attack success
-6. Compute stealth metrics
-7. Later: use SAM for mask-based placement
-8. Later: build Streamlit UI
+1. Load and validate a YAML configuration and enumerate images.
+2. Record a content-addressed manifest covering data, model, code, font, and runtime.
+3. Query original images for clean conditions, or construct and render instructions.
+4. Select fully contained mask rectangles when mask placement is requested.
+5. Query the local model using explicit decoding settings.
+6. Append completed outcomes or retryable errors to JSONL.
+7. Summarize one experiment using a named response metric.
 
-## Core Modules
+`src/config.py` defines the experiment contract. `src/provenance.py` records
+identity and manifests. `src/response_metrics.py` defines response matching.
+`src/region_ranker.py`, `src/segment_regions.py`, and `src/render_prompt.py` handle
+geometry and rendering. `src/model_clients/` performs local or mock inference.
+`src/run_experiment.py` coordinates trials; `src/evaluate.py` generates summaries.
 
-- `src/render_prompt.py`: image text rendering
-- `src/model_clients/`: local Qwen and mock model clients
-- `src/run_experiment.py`: experiment runner
-- `src/evaluate.py`: ASR computation
-- `src/metrics.py`: MSE, SSIM, OCR detection
-- `src/segment_regions.py`: SAM-based region detection
-- `src/ui/`: Streamlit demo
+`app.py` is a Streamlit diagnostic interface. `src/run_single.py` is a small
+single-image helper. Neither replaces the batch runner's manifest-based workflow.
+`src/validate_milestone1.py` generates reviewable diagnostic artifacts.
+
+See [evaluation.md](evaluation.md) for exact semantics and compatibility notes.

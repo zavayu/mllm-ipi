@@ -67,7 +67,7 @@ The project is designed to compare attack success across controlled variables:
 - Model backend: mock, Qwen2.5-VL, or Qwen3-VL.
 - Defensive or diagnostic metrics such as MSE and SSIM.
 
-The primary metric is Attack Success Rate, where a trial succeeds if the model response contains or matches the target string.
+The primary response metric is exact target output, with surrounding whitespace trimmed. Case-insensitive target containment is a separate diagnostic. Clean-image, image-only, and task-override conditions are evaluated separately. See [the evaluation contract](docs/evaluation.md) for definitions, manifests, and resume behavior.
 
 ## Project Structure
 
@@ -107,7 +107,7 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-For SAM-backed masks, install Segment Anything separately and provide a checkpoint with either `--sam-checkpoint`, config `sam_checkpoint`, or the `SAM_CHECKPOINT` environment variable. Without a SAM checkpoint, the mask generator uses deterministic fallback masks for development.
+For SAM-backed masks, install Segment Anything separately and provide a checkpoint with either `--sam-checkpoint`, config `sam_checkpoint`, or the `SAM_CHECKPOINT` environment variable. The mask experiment configs require SAM and a checkpoint. For development, explicitly select `rendering.mask_backend: grid`. The standalone mask generator retains an automatic fallback mode and records interior rectangles in its metadata.
 
 ## Usage
 
@@ -188,6 +188,24 @@ Launch the Streamlit demo:
 ```powershell
 streamlit run app.py
 ```
+
+## Milestone 1 validation
+
+Generate diagnostic images, exercise all three experiment conditions with the mock
+client, and check resume behavior:
+
+```powershell
+python -m src.validate_milestone1 --out-dir results/milestone1/review
+```
+
+Add `--qwen-smoke` to run a real clean/modified image pair. Add `--allow-cpu` only
+when CPU inference is intended. The diagnostic is not an attack-success benchmark.
+See [Milestone 1 validation](docs/milestone1.md) for evidence and limitations.
+
+Experiments default to one deterministic trial per configuration. To repeat sampled
+trials, set `model.do_sample: true`, `model.seed`, and `evaluation.repetitions`.
+Paper-style runs require an empty external instruction. Existing result files are
+preserved; legacy summaries require `--metric success` explicitly.
 
 ## Tests
 

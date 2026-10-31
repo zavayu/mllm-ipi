@@ -50,8 +50,38 @@ only completed trial IDs are skipped. A shared file can contain multiple
 experiments; summarize one with `--experiment-id`. Evaluation writes failed
 attempt counts separately in `attempts.json`.
 
+An interrupted, unterminated final JSONL record is saved to an `.incomplete-*`
+sidecar before recovery. Malformed complete records and corruption in the middle
+of a file cause an error. Manifest and prefix-cache writes replace files
+atomically. Run only one writer against a results file at a time.
+
 Use `rendering.mask_backend: sam` to require SAM with a checkpoint. It fails
 instead of silently using grid masks. `grid` explicitly ignores SAM environment
 configuration; `auto` selects SAM when a checkpoint is configured and otherwise
 records grid masks. Mock/injected test clients are identified in the manifest;
 they cannot be mistaken for a real Qwen inference run.
+
+## Rendering guarantees
+
+Candidate masks retain their full bounding box, a mask-content hash, and the
+largest fully contained axis-aligned rectangle. Placement uses that interior
+rectangle, not the bounding box of an irregular mask. The mask CLI additionally
+saves `masks.npz` so exported regions can be audited against actual masks.
+Legacy rectangle-only JSON is still accepted as rectangular annotations; regenerate
+old artifacts before making claims about containment in irregular masks.
+
+Font fitting reduces the requested size in approximately 10% steps, rounded to
+integer pixels, and includes the minimum size. A specified minimum is rounded up
+so rendering never falls below it. Actual font size, font name, requested scale,
+actual scale, fit status, and per-chunk geometry are recorded. Multi-mask layout
+excludes overlapping rectangles, preserves word order, and fails without writing
+a clipped image when the whole prompt cannot fit. The current word allocation is
+a deterministic heuristic; it does not guarantee finding every feasible layout.
+
+Fixed-placement text now wraps and fits within image margins instead of clipping.
+That behavior differs from historical runs; do not pool their results. Fixed and
+standalone top-mask calls without a minimum may shrink to one pixel. Use the
+recorded actual size, rather than requested scale alone, when analyzing readability.
+
+The batch runner is the canonical research path. The single-image helper and
+Streamlit app remain diagnostics rather than full experiment-management interfaces.
